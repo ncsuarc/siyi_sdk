@@ -37,9 +37,9 @@ stream-aiortsp = ["numpy>=1.21,<2.3", "aiortsp>=1.4,<2", "av>=14"]
 web            = ["numpy>=1.21,<2.3", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5"]
 
 [project.urls]
-Homepage = "https://github.com/mzahana/siyi_sdk"
-Repository = "https://github.com/mzahana/siyi_sdk"
-Changelog = "https://github.com/mzahana/siyi_sdk/blob/siyi-sdk-v2/CHANGELOG.md"
+Homepage = "https://github.com/ncsuarc/siyi_sdk"
+Repository = "https://github.com/ncsuarc/siyi_sdk"
+Changelog = "https://github.com/ncsuarc/siyi_sdk/blob/siyi-sdk-v2/CHANGELOG.md"
 
 [tool.hatch.envs.default]
 dependencies = [

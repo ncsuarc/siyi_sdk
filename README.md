@@ -1,7 +1,6 @@
 # SIYI SDK v2
 
-[![CI Status](https://github.com/mzahana/siyi_sdk/actions/workflows/ci.yml/badge.svg?branch=siyi-sdk-v2)](https://github.com/mzahana/siyi_sdk/actions/workflows/ci.yml?query=branch%3Asiyi-sdk-v2)
-[![codecov](https://codecov.io/gh/mzahana/siyi_sdk/branch/siyi-sdk-v2/graph/badge.svg)](https://codecov.io/gh/mzahana/siyi_sdk/tree/siyi-sdk-v2)
+[![CI Status](https://github.com/ncsuarc/siyi_sdk/actions/workflows/ci.yml/badge.svg?branch=siyi-sdk-v2)](https://github.com/ncsuarc/siyi_sdk/actions/workflows/ci.yml?query=branch%3Asiyi-sdk-v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **🌟 If you like this project and find it useful, please give it a star! ⭐**
@@ -19,7 +18,7 @@ The SIYI SDK provides a comprehensive, type-safe, and asyncio-native Python inte
 Clone the repository and install in development mode:
 
 ```bash
-git clone -b siyi-sdk-v2 https://github.com/mzahana/siyi_sdk.git
+git clone -b siyi-sdk-v2 https://github.com/ncsuarc/siyi_sdk.git
 cd siyi_sdk
 pip install -e .
 ```
@@ -367,8 +366,8 @@ The `examples/` directory contains ready-to-run scripts for all major features:
 ### Setup
 
 ```bash
-git clone https://github.com/mzahana/siyi-sdk.git
-cd siyi-sdk
+git clone -b siyi-sdk-v2 https://github.com/ncsuarc/siyi_sdk.git
+cd siyi_sdk
 python -m venv venv
 source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -e ".[stream-opencv,web]" # Includes common extras
@@ -397,4 +396,4 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 ## Support
 
-For issues, feature requests, or questions, please open an issue on [GitHub](https://github.com/mzahana/siyi_sdk/issues).
+For issues, feature requests, or questions, please open an issue on [GitHub](https://github.com/ncsuarc/siyi_sdk/issues).
