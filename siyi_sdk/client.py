@@ -322,6 +322,7 @@ class SIYIClient:
         *,
         expect_response: bool = True,
         timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> bytes:
         """Send a command and optionally wait for response.
 
@@ -336,6 +337,7 @@ class SIYIClient:
             payload: Encoded payload bytes.
             expect_response: Whether to wait for ACK.
             timeout: Override default timeout (seconds).
+            max_retries: Override retry count for idempotent requests.
 
         Returns:
             ACK payload bytes (empty if expect_response=False).
@@ -371,7 +373,8 @@ class SIYIClient:
         async with self._cmd_locks[cmd_id]:
             # Determine if eligible for retry
             is_idempotent = cmd_id in _IDEMPOTENT_READS
-            max_attempts = self._max_retries + 1 if is_idempotent else 1
+            retries = self._max_retries if max_retries is None else max_retries
+            max_attempts = retries + 1 if is_idempotent else 1
 
             for attempt in range(max_attempts):
                 # Create future for this request
@@ -729,6 +732,16 @@ class SIYIClient:
         ack = await self._send_command(0x06, payload)
         commands.decode_manual_focus_ack(ack)
 
+    async def manual_zoom_nowait(self, direction: int) -> None:
+        """Send continuous zoom velocity without waiting for an acknowledgment."""
+        payload = commands.encode_manual_zoom(direction)
+        await self._send_command(0x05, payload, expect_response=False)
+
+    async def manual_focus_nowait(self, direction: int) -> None:
+        """Send continuous focus velocity without waiting for an acknowledgment."""
+        payload = commands.encode_manual_focus(direction)
+        await self._send_command(0x06, payload, expect_response=False)
+
     async def absolute_zoom(self, zoom: float) -> None:
         """Set absolute zoom level with auto-focus.
 
@@ -983,14 +996,20 @@ class SIYIClient:
     # Camera (0x0A, 0x0B, 0x0C, 0x20, 0x21, 0x48, 0x49, 0x4A, 0x4B, 0x4C)
     # =========================================================================
 
-    async def get_camera_system_info(self) -> CameraSystemInfo:
+    async def get_camera_system_info(
+        self, *, timeout: float | None = None, max_retries: int | None = None
+    ) -> CameraSystemInfo:
         """Request camera system information.
+
+        Args:
+            timeout: Override reply timeout in seconds.
+            max_retries: Override retries; use zero for a single RTT sample.
 
         Returns:
             Camera system info.
         """
         payload = commands.encode_camera_system_info()
-        ack = await self._send_command(0x0A, payload)
+        ack = await self._send_command(0x0A, payload, timeout=timeout, max_retries=max_retries)
         return commands.decode_camera_system_info(ack)
 
     def on_function_feedback(self, cb: Callable[[FunctionFeedback], None]) -> Unsubscribe:

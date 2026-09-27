@@ -8,6 +8,10 @@ import asyncio
 import logging
 import json
 import os
+import time
+import math
+from collections import deque
+from ipaddress import IPv4Address
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -16,7 +20,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from siyi_sdk import (
     SIYIClient,
@@ -57,14 +61,33 @@ class CameraState:
         self.media: Optional[MediaClient] = None
         self.stream: Optional[SIYIStream] = None
         self.latest_frame: Optional[bytes] = None
+        self.last_frame_time = 0.0
+        self.stream_error: Optional[str] = None
         self.frame_event = asyncio.Event()
         self.attitude = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
         self.lock = asyncio.Lock()
         self.is_connected = False
         self.watchdog_task: Optional[asyncio.Task] = None
+        self.connection_error: Optional[str] = None
         self.ip: Optional[str] = None
         self.live_enabled = True
         self.stop_event = asyncio.Event() # For clean shutdown
+        self.status_task: Optional[asyncio.Task] = None
+        self.motion_task: Optional[asyncio.Task] = None
+        self.status_lock = asyncio.Lock()
+        self.action_lock = asyncio.Lock()
+        self.camera_status = None
+        self.status_time = 0.0
+        self.status_error = None
+        self.rtt_samples = deque(maxlen=100)
+        self.rtt_failures = deque(maxlen=100)
+        self.motion_deadlines = {}
+        self.jpeg_ms = None
+        self.attitude_time = 0.0
+        self.actions = {}
+        self.confirmation_tasks = {}
+        self.action_counter = 0
+        self.last_status_failure = None
 
     async def initialize(self, ip: str):
         async with self.lock:
@@ -79,13 +102,18 @@ class CameraState:
             logger.info(f"Initializing clients for IP: {ip}")
             transport = UDPTransport(ip)
             self.client = SIYIClient(transport)
+            self.client.on_attitude(self._on_attitude)
+            # Status uses its own command ID lock, with one attempt per query;
+            # keep the same UDP socket used by telemetry and motion control.
+            self.status_task = asyncio.create_task(self.poll_status())
+            self.motion_task = asyncio.create_task(self.motion_watchdog())
             self.media = MediaClient(ip)
             
             # Initialize Video Stream
             rtsp_url = build_rtsp_url(host=ip, generation=CameraGeneration.OLD, stream="main")
             config = StreamConfig(
                 rtsp_url=rtsp_url,
-                backend=StreamBackend.GSTREAMER,
+                backend=StreamBackend.AUTO,
                 latency_ms=100,
                 codec="h265",
             )
@@ -106,31 +134,46 @@ class CameraState:
                         # Attempt to connect and ping
                         if not self.is_connected:
                             await asyncio.wait_for(self.client.connect(), timeout=5.0)
-                            await asyncio.wait_for(
-                                self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ10),
-                                timeout=2.0
-                            )
-                            self.client.on_attitude(self._on_attitude)
                         
-                        await asyncio.wait_for(self.client.get_firmware_version(), timeout=2.0)
+                        # Allow all three SDK attempts (2s each) and their backoff.
+                        await asyncio.wait_for(self.client.get_firmware_version(), timeout=8.0)
+                        self.connection_error = None
+                        consecutive_failures = 0
                         
                         if not self.is_connected:
                             logger.info("Camera connection restored")
                             self.is_connected = True
                             consecutive_failures = 0
-                            # Recover stream if it was supposed to be running
-                            if self.live_enabled:
-                                if self.stream and not self.stream.is_running:
-                                    logger.info("Watchdog: Restarting stream...")
-                                    await asyncio.wait_for(self.stream.start(), timeout=10.0)
+                            # Telemetry support must not gate camera connectivity.
+                            try:
+                                await asyncio.wait_for(
+                                    self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ10),
+                                    timeout=2.0
+                                )
+                            except Exception as e:
+                                logger.warning(f"Attitude subscription failed: {e}")
                     except Exception as e:
                         logger.debug(f"Watchdog ping failed: {e}")
+                        self.connection_error = (
+                            f"No camera SDK response from {self.ip} on UDP port 37260. "
+                            "Ping and the RTSP video port do not verify this control connection."
+                        )
                         consecutive_failures += 1
                         if consecutive_failures >= 2 and self.is_connected:
                             logger.warning("Camera connection lost (Watchdog)")
                             self.is_connected = False
+                            self.latest_frame = None
+                            self.last_frame_time = 0.0
                             if self.stream:
                                 await asyncio.wait_for(self.stream.stop(), timeout=3.0)
+
+                    # A video backend failure must not mark a responding camera offline.
+                    # Retry video independently, including after a failed start.
+                    if self.is_connected and self.live_enabled and self.stream and not self.stream.is_running:
+                        try:
+                            await self.toggle_stream(True)
+                        except Exception as e:
+                            logger.warning(f"Video stream unavailable: {e}")
                 
                 await asyncio.sleep(2) # Faster polling
             except asyncio.CancelledError:
@@ -140,21 +183,192 @@ class CameraState:
                 await asyncio.sleep(5)
 
     def _on_attitude(self, att):
+        self.attitude_time = time.monotonic()
         self.attitude = {
             "yaw": att.yaw_deg,
             "pitch": att.pitch_deg,
             "roll": att.roll_deg
         }
 
-    def _on_frame(self, frame):
+    async def _on_frame(self, frame):
         # Encode to JPEG for MJPEG stream
-        success, buffer = cv2.imencode('.jpg', frame.frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        received = time.monotonic()
+        started = time.perf_counter()
+        success, buffer = await asyncio.to_thread(
+            cv2.imencode, '.jpg', frame.frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+        )
+        self.jpeg_ms = round((time.perf_counter() - started) * 1000, 1)
         if success:
             self.latest_frame = buffer.tobytes()
+            self.last_frame_time = received
+            self.stream_error = None
             self.frame_event.set()
 
+    async def refresh_status(self):
+        async with self.status_lock:
+            client = self.client
+            if not client:
+                raise HTTPException(status_code=503, detail="Status connection unavailable")
+            started = time.perf_counter()
+            try:
+                info = await client.get_camera_system_info(timeout=0.7, max_retries=0)
+                rtt = round((time.perf_counter() - started) * 1000, 1)
+                self.rtt_samples.append(rtt)
+                self.rtt_failures.append(False)
+                self.camera_status = {
+                    "gimbal_mode": info.gimbal_motion_mode.name,
+                    "recording": info.record_sta.name,
+                    "hdr": bool(info.hdr_sta),
+                    "mounting": info.gimbal_mounting_dir.name,
+                    "video_output": info.video_hdmi_or_cvbs.name,
+                }
+                self.status_time = time.monotonic()
+                self.status_error = None
+                return self.camera_status
+            except Exception as e:
+                self.rtt_samples.append(None)
+                self.rtt_failures.append(True)
+                self.status_error = str(e) or "Camera status query failed"
+                self.last_status_failure = f"{type(e).__name__}: {self.status_error}"
+                raise
+
+    def begin_confirmation(self, kind, target, send_ms):
+        self.action_counter += 1
+        action = {
+            "id": self.action_counter, "target": target, "status": "pending",
+            "send_ms": send_ms, "confirmation_ms": None, "error": None,
+            "_started": time.monotonic(),
+        }
+        self.actions[kind] = action
+        self.confirmation_tasks[kind] = asyncio.create_task(self.confirm_action(kind, action))
+
+    async def confirm_action(self, kind, action):
+        field = "gimbal_mode" if kind == "mode" else "recording"
+        try:
+            # Query immediately; subsequent reads are spaced only when the
+            # camera has not applied the command yet. This never holds HTTP open.
+            while time.monotonic() - action["_started"] < 3:
+                try:
+                    info = await self.refresh_status()
+                    if info[field] == action["target"]:
+                        action["status"] = "confirmed"
+                        return
+                    if kind == "record" and info[field] in ("NO_TF_CARD", "DATA_LOSS"):
+                        action["status"] = "failed"
+                        action["error"] = info[field]
+                        return
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+            action["status"] = "unconfirmed"
+            action["error"] = self.status_error or "Camera did not report the requested state within 3 seconds"
+        finally:
+            action["confirmation_ms"] = round((time.monotonic() - action["_started"]) * 1000, 1)
+
+    async def poll_status(self):
+        while True:
+            if self.is_connected:
+                try:
+                    await self.refresh_status()
+                except Exception:
+                    pass
+            await asyncio.sleep(1)
+
+    def status_snapshot(self):
+        now = time.monotonic()
+        age = now - self.status_time if self.status_time else None
+        samples = sorted(sample for sample in self.rtt_samples if sample is not None)
+        def percentile(fraction):
+            return samples[max(0, math.ceil(len(samples) * fraction) - 1)] if samples else None
+        return {
+            "camera": self.camera_status,
+            "actions": {
+                kind: {
+                    **{key: value for key, value in action.items() if not key.startswith("_")},
+                    "elapsed_ms": round((now - action["_started"]) * 1000, 1),
+                }
+                for kind, action in self.actions.items()
+            },
+            "status_age_ms": round(age * 1000) if age is not None else None,
+            "status_fresh": self.is_connected and age is not None and age < 3 and not self.status_error,
+            "status_error": self.status_error,
+            "latency": {
+                "camera_rtt_ms": self.rtt_samples[-1] if self.rtt_samples else None,
+                "camera_p50_ms": percentile(0.5), "camera_p95_ms": percentile(0.95),
+                "samples": len(samples),
+                "timeouts": sum(self.rtt_failures), "queries": len(self.rtt_failures),
+                "last_failure": self.last_status_failure,
+                "jpeg_ms": self.jpeg_ms,
+                "frame_age_ms": round((now - self.last_frame_time) * 1000) if self.last_frame_time else None,
+                "attitude_age_ms": round((now - self.attitude_time) * 1000) if self.attitude_time else None,
+            },
+        }
+
+    async def send_motion(self, kind, value):
+        moving = any(value) if kind == "rotate" else value != 0
+        if not self.client or (moving and not self.is_connected):
+            raise HTTPException(status_code=503, detail="Camera not connected")
+        for _ in range(1 if moving else 3):
+            if kind == "rotate":
+                await self.client.rotate_nowait(*value)
+            else:
+                method = self.client.manual_zoom_nowait if kind == "zoom" else self.client.manual_focus_nowait
+                await method(value)
+        if moving:
+            self.motion_deadlines[kind] = time.monotonic() + 0.4
+        else:
+            self.motion_deadlines.pop(kind, None)
+
+    async def motion_watchdog(self):
+        # Stop if the page disappears or updates stop arriving. UDP delivery is
+        # unconfirmed; send three stops without waiting for ACKs.
+        while True:
+            for kind, deadline in list(self.motion_deadlines.items()):
+                if time.monotonic() >= deadline:
+                    try:
+                        await self.send_motion(kind, (0, 0) if kind == "rotate" else 0)
+                    except Exception:
+                        pass
+                    self.motion_deadlines.pop(kind, None)
+            await asyncio.sleep(0.05)
+
     async def shutdown(self):
+        for task in list(self.confirmation_tasks.values()):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.confirmation_tasks.clear()
+        self.actions.clear()
+        self.last_status_failure = None
+        for task in (self.status_task, self.motion_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self.status_task = self.motion_task = None
+        for kind in list(self.motion_deadlines):
+            try:
+                await self.send_motion(kind, (0, 0) if kind == "rotate" else 0)
+            except Exception:
+                pass
+        self.motion_deadlines.clear()
+        self.camera_status = None
+        self.status_time = self.attitude_time = 0.0
+        self.status_error = None
+        self.rtt_samples.clear()
+        self.rtt_failures.clear()
+        self.jpeg_ms = None
         self.stop_event.set()
+        self.connection_error = None
+        self.is_connected = False
+        self.latest_frame = None
+        self.last_frame_time = 0.0
+        self.stream_error = None
+        self.frame_event.clear()
         if self.watchdog_task:
             self.watchdog_task.cancel()
             try:
@@ -196,10 +410,17 @@ class CameraState:
                 return
             if enabled and not self.stream.is_running and self.is_connected:
                 logger.info("Starting backend stream...")
-                await asyncio.wait_for(self.stream.start(), timeout=10.0)
+                try:
+                    await asyncio.wait_for(self.stream.start(), timeout=10.0)
+                    self.stream_error = None
+                except Exception as e:
+                    self.stream_error = str(e) or "Video stream timed out"
+                    raise
             elif not enabled and self.stream.is_running:
                 logger.info("Stopping backend stream (deep sleep)...")
                 await asyncio.wait_for(self.stream.stop(), timeout=5.0)
+                self.latest_frame = None
+                self.last_frame_time = 0.0
 
 state = CameraState()
 
@@ -212,13 +433,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.middleware("http")
+async def request_timing(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - started) * 1000:.2f}"
+    return response
+
 # Models
 class IPConfigRequest(BaseModel):
-    ip: str
+    ip: IPv4Address
 
 class RotateRequest(BaseModel):
-    yaw: int
-    pitch: int
+    yaw: int = Field(ge=-100, le=100)
+    pitch: int = Field(ge=-100, le=100)
+
+class GimbalModeRequest(BaseModel):
+    mode: str
 
 class EncodingRequest(BaseModel):
     # Simplified for UI
@@ -229,81 +460,137 @@ class EncodingRequest(BaseModel):
 @app.post("/api/config/ip")
 async def set_ip(req: IPConfigRequest):
     try:
-        await state.initialize(req.ip)
-        GLOBAL_CONFIG["camera_ip"] = req.ip
-        return {"status": "ok", "ip": req.ip}
+        ip = str(req.ip)
+        await state.initialize(ip)
+        GLOBAL_CONFIG["camera_ip"] = ip
+        return {"status": "ok", "ip": ip}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/config/ip")
 async def get_ip():
-    return {"ip": GLOBAL_CONFIG["camera_ip"], "connected": state.is_connected}
+    return {
+        "ip": GLOBAL_CONFIG["camera_ip"],
+        "connected": state.is_connected,
+        "connection_error": state.connection_error,
+        "stream_ready": state.is_connected and state.live_enabled and time.monotonic() - state.last_frame_time < 5.0,
+        "stream_error": state.stream_error,
+        **state.status_snapshot(),
+    }
+
+@app.post("/api/gimbal/mode")
+async def set_gimbal_mode(req: GimbalModeRequest):
+    modes = {"LOCK": CaptureFuncType.LOCK_MODE, "FOLLOW": CaptureFuncType.FOLLOW_MODE, "FPV": CaptureFuncType.FPV_MODE}
+    if req.mode not in modes:
+        raise HTTPException(status_code=422, detail="Mode must be LOCK, FOLLOW or FPV")
+    if not state.client or not state.is_connected:
+        raise HTTPException(status_code=503, detail="Camera not connected")
+    queued = time.perf_counter()
+    async with state.action_lock:
+        queue_ms = round((time.perf_counter() - queued) * 1000, 1)
+        if state.actions.get("mode", {}).get("status") == "pending":
+            raise HTTPException(status_code=409, detail="A mode change is awaiting camera confirmation")
+        try:
+            started = time.perf_counter()
+            await state.client.capture(modes[req.mode])
+            send_ms = round((time.perf_counter() - started) * 1000, 1)
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        # Transmission is not confirmation: only a subsequent camera report
+        # is allowed to select the active mode in the UI.
+        state.begin_confirmation("mode", req.mode, send_ms)
+        return {"status": "sent", "command_timing": {"send_ms": send_ms, "queue_ms": queue_ms}, **state.status_snapshot()}
 
 @app.post("/api/gimbal/rotate")
 async def rotate(req: RotateRequest):
-    if not state.client:
-        raise HTTPException(status_code=503, detail="Camera not connected")
+    started = time.perf_counter()
     try:
-        await state.client.rotate(req.yaw, req.pitch)
-    except TimeoutError:
-        # High-frequency commands often timeout under load; ignore to keep logs clean
-        pass
+        await state.send_motion("rotate", (req.yaw, req.pitch))
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Rotate command failed: {e}")
-    return {"status": "ok"}
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
 @app.post("/api/gimbal/center")
 async def center():
     if not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
     try:
+        started = time.perf_counter()
         await state.client.one_key_centering(CenteringAction.CENTER)
     except Exception as e:
         logger.error(f"Center command failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "ok"}
+    return {"status": "ok", "command_timing": {"sdk_reply_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
 @app.post("/api/camera/photo")
 async def take_photo():
     if not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
     try:
+        started = time.perf_counter()
         await state.client.capture(CaptureFuncType.PHOTO)
     except Exception as e:
         logger.error(f"Photo command failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "ok"}
+    return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
 @app.post("/api/camera/record")
 async def toggle_record():
-    if not state.client:
+    if not state.client or not state.is_connected:
         raise HTTPException(status_code=503, detail="Camera not connected")
-    try:
-        await state.client.capture(CaptureFuncType.START_RECORD)
-    except Exception as e:
-        logger.error(f"Record command failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "ok"}
+    queued = time.perf_counter()
+    async with state.action_lock:
+        queue_ms = round((time.perf_counter() - queued) * 1000, 1)
+        if state.actions.get("record", {}).get("status") == "pending":
+            raise HTTPException(status_code=409, detail="Recording is awaiting camera confirmation")
+        try:
+            started = time.perf_counter()
+            before = await state.refresh_status()
+            preflight_ms = round((time.perf_counter() - started) * 1000, 1)
+            if before["recording"] not in ("RECORDING", "NOT_RECORDING"):
+                raise HTTPException(status_code=409, detail="Recording unavailable: " + before["recording"])
+            started = time.perf_counter()
+            await state.client.capture(CaptureFuncType.START_RECORD)
+            send_ms = round((time.perf_counter() - started) * 1000, 1)
+            target = "NOT_RECORDING" if before["recording"] == "RECORDING" else "RECORDING"
+            state.begin_confirmation("record", target, send_ms)
+            return {"status": "sent", "command_timing": {"send_ms": send_ms, "queue_ms": queue_ms, "preflight_ms": preflight_ms}, **state.status_snapshot()}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail="Recording state unconfirmed: " + str(e))
 
 @app.post("/api/camera/zoom")
 async def zoom(direction: int): # -1, 0, 1
     if not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
     try:
-        await state.client.manual_zoom(direction)
+        started = time.perf_counter()
+        if direction not in (-1, 0, 1):
+            raise HTTPException(status_code=422, detail="Direction must be -1, 0 or 1")
+        await state.send_motion("zoom", direction)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Zoom command failed: {e}")
-    return {"status": "ok"}
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
 @app.post("/api/camera/focus")
 async def focus(direction: int): # -1, 0, 1
     if not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
     try:
-        await state.client.manual_focus(direction)
+        started = time.perf_counter()
+        if direction not in (-1, 0, 1):
+            raise HTTPException(status_code=422, detail="Direction must be -1, 0 or 1")
+        await state.send_motion("focus", direction)
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Focus command failed: {e}")
-    return {"status": "ok"}
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
 @app.get("/api/camera/encoding")
 async def get_encoding():
@@ -472,7 +759,7 @@ async def websocket_attitude(websocket: WebSocket):
     await websocket.accept()
     try:
         while not state.stop_event.is_set():
-            await websocket.send_json(state.attitude)
+            await websocket.send_json({**state.attitude, **state.status_snapshot()})
             await asyncio.sleep(0.1) # 10Hz
     except WebSocketDisconnect:
         pass
@@ -505,7 +792,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    with open(os.path.join(UI_DIR, "index.html")) as f:
+    with open(os.path.join(UI_DIR, "index.html"), encoding="utf-8") as f:
         return f.read()
 
 if __name__ == "__main__":

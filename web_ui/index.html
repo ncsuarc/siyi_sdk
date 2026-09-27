@@ -11,19 +11,12 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
-    <div id="offline-overlay" class="offline-overlay">
-        <div class="overlay-content">
-            <i class="fas fa-sync fa-spin fa-3x" style="color: var(--accent-color); margin-bottom: 20px;"></i>
-            <h2 id="overlay-title">CAMERA OFFLINE</h2>
-            <p id="overlay-msg">Waiting for connection to be restored...</p>
-        </div>
-    </div>
     <header>
         <div class="logo">SIYI COMMAND</div>
         <div class="status-bar">
             <div class="status-item">
-                <span id="connection-indicator" class="indicator online"></span>
-                <span id="camera-status">CONNECTED</span>
+                <span id="connection-indicator" class="indicator"></span>
+                <span id="camera-status">CHECKING...</span>
             </div>
             <div class="status-item">
                 <i class="fas fa-microchip"></i>
@@ -44,8 +37,25 @@
 
     <main>
         <div class="viewport-section">
+            <section class="camera-state-strip" aria-label="Camera reported status">
+                <div><span class="state-label">Gimbal mode</span><strong id="gimbal-mode-status">Unknown</strong></div>
+                <div><span class="state-label">Recording</span><strong id="record-state-status">Unknown</strong></div>
+                <div><span class="state-label">HDR</span><strong id="hdr-status">Unknown</strong></div>
+                <div><span class="state-label">Status source</span><strong id="state-freshness">Waiting for camera</strong></div>
+            </section>
             <div class="video-container">
-                <img id="video-stream" src="/api/stream/video" alt="Video Stream">
+                <img id="video-stream" alt="Video Stream" hidden>
+                <p id="video-status" class="video-status" role="status" hidden></p>
+                <div id="offline-overlay" class="offline-overlay active" role="status" aria-live="polite">
+                    <div class="overlay-content">
+                        <h2 id="overlay-title">CHECKING CONNECTION</h2>
+                        <p id="overlay-msg">Checking whether the camera is reachable...</p>
+                        <div class="connection-actions">
+                            <button class="btn btn-primary" id="retry-connection-btn">Retry connection</button>
+                            <button class="btn" id="offline-config-btn">Camera settings</button>
+                        </div>
+                    </div>
+                </div>
                 <div class="video-overlay">
                     <div class="overlay-card">
                         Y: <span id="att-yaw">0.0</span>° | P: <span id="att-pitch">0.0</span>° | R: <span id="att-roll">0.0</span>°
@@ -71,12 +81,7 @@
                     </div>
                     <div class="media-grid" id="media-grid">
                         <!-- Media items will be injected here -->
-                        <div class="media-card">
-                            <div class="media-thumb"><i class="fas fa-spinner fa-spin"></i></div>
-                            <div class="media-info">
-                                <div class="media-name">Loading media...</div>
-                            </div>
-                        </div>
+                        <p class="media-message">Connect the camera to browse media.</p>
                     </div>
                 </div>
             </section>
@@ -85,6 +90,12 @@
         <aside class="control-panel">
             <div class="control-card">
                 <h3>Gimbal Control</h3>
+                <div class="mode-controls" role="group" aria-label="Gimbal mode">
+                    <button class="btn" id="lock-btn" aria-pressed="false">Lock</button>
+                    <button class="btn" id="follow-btn" aria-pressed="false">Follow</button>
+                    <button class="btn" id="fpv-btn" aria-pressed="false">FPV</button>
+                </div>
+                <p id="mode-description" class="control-hint">The selected mode comes from the camera.</p>
                 <div class="joystick-container">
                     <div id="joystick-zone" class="virtual-joystick">
                         <div id="joystick-handle" class="joystick-handle"></div>
@@ -92,8 +103,32 @@
                 </div>
                 <div class="grid-controls">
                     <button class="btn" id="center-btn"><i class="fas fa-compress-arrows-alt"></i> Center</button>
-                    <button class="btn" id="lock-btn"><i class="fas fa-lock"></i> Lock</button>
+                    <button class="btn" id="stop-btn"><i class="fas fa-stop"></i> Stop motion</button>
                 </div>
+            </div>
+
+            <div class="control-card latency-card">
+                <h3>Control latency</h3>
+                <p id="latency-command" class="control-hint">Last command: none</p>
+                <dl class="latency-values">
+                    <div><dt>Browser request</dt><dd id="latency-browser">—</dd></div>
+                    <div><dt>Server handler</dt><dd id="latency-server">—</dd></div>
+                    <div><dt>SDK send / reply wait</dt><dd id="latency-send">—</dd></div>
+                    <div><dt>Queue / preflight read</dt><dd id="latency-preflight">—</dd></div>
+                    <div><dt>State confirmation</dt><dd id="latency-confirmation">—</dd></div>
+                    <div><dt>Camera reply RTT</dt><dd id="latency-camera">—</dd></div>
+                    <div><dt>Successful p50 / p95</dt><dd id="latency-percentiles">—</dd></div>
+                    <div><dt>Failed status queries</dt><dd id="latency-timeouts">—</dd></div>
+                    <div><dt>JPEG encode / frame age</dt><dd id="latency-video">—</dd></div>
+                    <div><dt>Attitude age</dt><dd id="latency-attitude">—</dd></div>
+                </dl>
+                <p id="latency-samples" class="control-hint">Collecting camera responses automatically.</p>
+                <p id="latency-failure" class="control-hint" hidden></p>
+                <details class="latency-help">
+                    <summary>How to measure and interpret delay</summary>
+                    <p class="control-hint">Browser and server timings follow the named command. SDK send measures local dispatch, not camera execution. Center waits for a reply; recording first reads the current state. Mode and recording confirmation happens in the background and is measured separately. Camera RTT uses status readbacks with no retries and a 700 ms timeout; it includes camera processing. Percentiles exclude failed queries. Frame age is time since the server received a decoded frame, not video delay.</p>
+                    <p class="control-hint">To measure visible delay, film your hand pressing a control and the live view together, then count frames until motion appears. Delay in milliseconds = frames × 1000 ÷ filming FPS. Compare command timings with Live View on and off to isolate video overhead.</p>
+                </details>
             </div>
 
             <div class="control-card">
@@ -136,6 +171,7 @@
             <div class="input-group">
                 <label>Encoding Resolution</label>
                 <select id="config-res-select">
+                    <option value="">Keep current resolution</option>
                     <option value="1920x1080">1080P</option>
                     <option value="1280x720">720P</option>
                 </select>
@@ -157,10 +193,13 @@
             </div>
             
             <div style="margin-top: 25px;">
+                <p id="config-status" role="status" aria-live="polite"></p>
                 <button class="btn btn-primary" style="width: 100%" id="save-config-btn">Save Changes</button>
             </div>
         </div>
     </div>
+
+    <div id="command-status" class="command-status" role="status" aria-live="polite" hidden></div>
 
     <script src="/static/app.js"></script>
 </body>
