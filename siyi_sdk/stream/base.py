@@ -15,7 +15,7 @@ from __future__ import annotations
 import abc
 from collections.abc import AsyncGenerator
 
-from .models import StreamConfig, StreamFrame
+from .models import StreamConfig, StreamFrame, StreamState
 
 
 class AbstractStreamBackend(abc.ABC):
@@ -32,6 +32,8 @@ class AbstractStreamBackend(abc.ABC):
             config: Stream configuration including RTSP URL and tuning parameters.
         """
         self._config = config
+        self.state = StreamState.STOPPED
+        self.last_error: Exception | None = None
 
     @abc.abstractmethod
     async def connect(self) -> None:

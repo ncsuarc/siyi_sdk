@@ -21,13 +21,13 @@ class TestParserBasic:
     def test_empty_feed(self):
         """Empty feed should return empty list."""
         parser = FrameParser()
-        result = parser.feed(b"")
+        result = parser.feed(b"").frames
         assert result == []
 
     def test_parse_heartbeat(self):
         """Parser should extract heartbeat frame."""
         parser = FrameParser()
-        frames = parser.feed(HEARTBEAT_FRAME)
+        frames = parser.feed(HEARTBEAT_FRAME).frames
         assert len(frames) == 1
         assert frames[0].cmd_id == 0x00
 
@@ -36,7 +36,7 @@ class TestParserBasic:
         parser = FrameParser()
         frames = []
         for byte in HEARTBEAT_FRAME:
-            result = parser.feed(bytes([byte]))
+            result = parser.feed(bytes([byte])).frames
             frames.extend(result)
         assert len(frames) == 1
         assert frames[0].cmd_id == 0x00
@@ -46,7 +46,7 @@ class TestParserBasic:
         parser = FrameParser()
         # Send 3 heartbeat frames
         data = HEARTBEAT_FRAME * 3
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 3
         for frame in frames:
             assert frame.cmd_id == 0x00
@@ -59,7 +59,7 @@ class TestParserBasic:
         # Reset
         parser.reset()
         # Feed complete frame
-        frames = parser.feed(HEARTBEAT_FRAME)
+        frames = parser.feed(HEARTBEAT_FRAME).frames
         assert len(frames) == 1
 
 
@@ -71,7 +71,7 @@ class TestParserResync:
         parser = FrameParser()
         # Garbage followed by valid frame
         data = b"\xaa\xbb\xcc" + HEARTBEAT_FRAME
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 1
         assert frames[0].cmd_id == 0x00
 
@@ -80,7 +80,7 @@ class TestParserResync:
         parser = FrameParser()
         # Garbage with 0x55 bytes, then valid frame
         data = b"\x55\xaa\x55\xbb" + HEARTBEAT_FRAME
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 1
         assert frames[0].cmd_id == 0x00
 
@@ -89,7 +89,7 @@ class TestParserResync:
         parser = FrameParser()
         # 0x55 followed by wrong byte, then valid frame
         data = b"\x55\xaa" + HEARTBEAT_FRAME
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 1
 
     def test_consecutive_stx1(self):
@@ -97,7 +97,7 @@ class TestParserResync:
         parser = FrameParser()
         # Multiple 0x55 bytes before valid frame
         data = b"\x55\x55\x55" + HEARTBEAT_FRAME
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 1
 
 
@@ -109,8 +109,7 @@ class TestParserCRCError:
         parser = FrameParser()
         # Corrupt CRC bytes
         bad_frame = HEARTBEAT_FRAME[:-2] + b"\xff\xff"
-        with pytest.raises(CRCError):
-            parser.feed(bad_frame)
+        assert isinstance(parser.feed(bad_frame).errors[0], CRCError)
 
     def test_resync_after_crc_error(self):
         """Parser should resync after CRC error."""
@@ -120,8 +119,7 @@ class TestParserCRCError:
         data = bad_frame + HEARTBEAT_FRAME
 
         # First call raises CRCError
-        with pytest.raises(CRCError):
-            parser.feed(data)
+        assert isinstance(parser.feed(data).errors[0], CRCError)
 
         # Parser should have reset, so we need to try again with remaining data
         # Actually, the parser processes byte by byte, so after the exception
@@ -134,11 +132,10 @@ class TestParserCRCError:
         bad_frame = HEARTBEAT_FRAME[:-2] + b"\xff\xff"
 
         # Feed bad frame
-        with pytest.raises(CRCError):
-            parser.feed(bad_frame)
+        assert isinstance(parser.feed(bad_frame).errors[0], CRCError)
 
         # Parser should have reset, feed good frame
-        frames = parser.feed(HEARTBEAT_FRAME)
+        frames = parser.feed(HEARTBEAT_FRAME).frames
         assert len(frames) == 1
 
     def test_one_byte_flip_causes_crc_error(self):
@@ -148,8 +145,7 @@ class TestParserCRCError:
         frame_bytes = bytes.fromhex("556601020000000764643dcf")  # Pan/Tilt
         bad_frame = frame_bytes[:9] + b"\x00" + frame_bytes[10:]  # Flip byte 9
 
-        with pytest.raises(CRCError):
-            parser.feed(bad_frame)
+        assert isinstance(parser.feed(bad_frame).errors[0], CRCError)
 
 
 class TestParserOversizedPayload:
@@ -161,8 +157,7 @@ class TestParserOversizedPayload:
         # Craft header with data_len > max_payload
         # STX + CTRL + data_len(500) + SEQ + CMD_ID
         header = b"\x55\x66\x01\xf4\x01\x00\x00\x00"  # data_len = 0x01F4 = 500
-        with pytest.raises(FramingError):
-            parser.feed(header)
+        assert isinstance(parser.feed(header).errors[0], FramingError)
 
     def test_recovery_after_oversized(self):
         """Parser should recover after oversized payload."""
@@ -170,11 +165,10 @@ class TestParserOversizedPayload:
         # Craft header with data_len > max_payload
         header = b"\x55\x66\x01\xf4\x01\x00\x00\x00"
 
-        with pytest.raises(FramingError):
-            parser.feed(header)
+        assert isinstance(parser.feed(header).errors[0], FramingError)
 
         # Should recover
-        frames = parser.feed(HEARTBEAT_FRAME)
+        frames = parser.feed(HEARTBEAT_FRAME).frames
         assert len(frames) == 1
 
 
@@ -188,7 +182,7 @@ class TestParserChunkedInput:
         data = HEARTBEAT_FRAME
         for i in range(0, len(data), 2):
             chunk = data[i : i + 2]
-            result = parser.feed(chunk)
+            result = parser.feed(chunk).frames
             frames.extend(result)
         assert len(frames) == 1
 
@@ -199,7 +193,7 @@ class TestParserChunkedInput:
         data = HEARTBEAT_FRAME
         for i in range(0, len(data), 3):
             chunk = data[i : i + 3]
-            result = parser.feed(chunk)
+            result = parser.feed(chunk).frames
             frames.extend(result)
         assert len(frames) == 1
 
@@ -207,20 +201,20 @@ class TestParserChunkedInput:
         """Parser should buffer partial header."""
         parser = FrameParser()
         # Feed header without data or CRC
-        frames1 = parser.feed(HEARTBEAT_FRAME[:8])
+        frames1 = parser.feed(HEARTBEAT_FRAME[:8]).frames
         assert frames1 == []
         # Feed rest
-        frames2 = parser.feed(HEARTBEAT_FRAME[8:])
+        frames2 = parser.feed(HEARTBEAT_FRAME[8:]).frames
         assert len(frames2) == 1
 
     def test_split_crc(self):
         """Parser should handle split CRC."""
         parser = FrameParser()
         # Feed everything except last CRC byte
-        frames1 = parser.feed(HEARTBEAT_FRAME[:-1])
+        frames1 = parser.feed(HEARTBEAT_FRAME[:-1]).frames
         assert frames1 == []
         # Feed last byte
-        frames2 = parser.feed(HEARTBEAT_FRAME[-1:])
+        frames2 = parser.feed(HEARTBEAT_FRAME[-1:]).frames
         assert len(frames2) == 1
 
 
@@ -244,7 +238,7 @@ class TestParserChapter4Examples:
         """Parser should correctly parse Chapter 4 examples."""
         parser = FrameParser()
         wire = bytes.fromhex(wire_hex)
-        frames = parser.feed(wire)
+        frames = parser.feed(wire).frames
         assert len(frames) == 1, f"Failed to parse {name}"
 
     def test_multiple_mixed_examples(self):
@@ -255,7 +249,7 @@ class TestParserChapter4Examples:
             + bytes.fromhex("5566010100000005018d64")  # zoom +1
             + bytes.fromhex("556601010000000801d112")  # one-key centering
         )
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
         assert len(frames) == 3
         assert frames[0].cmd_id == 0x00
         assert frames[1].cmd_id == 0x05
@@ -279,5 +273,5 @@ class TestParserMaxPayload:
         """Payload at exactly max_payload should work."""
         parser = FrameParser(max_payload=1)  # Only 1-byte payloads allowed
         # Heartbeat has 1-byte payload
-        frames = parser.feed(HEARTBEAT_FRAME)
+        frames = parser.feed(HEARTBEAT_FRAME).frames
         assert len(frames) == 1

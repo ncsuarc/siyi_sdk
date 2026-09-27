@@ -38,7 +38,7 @@ class TestTimeoutHandling:
         mock_transport: MockTransport,
     ) -> None:
         """Test that timeout occurs when no response is received."""
-        client = SIYIClient(mock_transport, default_timeout=0.1)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.1)
         await client.connect()
 
         # Don't queue any response
@@ -53,7 +53,7 @@ class TestTimeoutHandling:
         mock_transport: MockTransport,
     ) -> None:
         """Test client remains functional after a timeout."""
-        client = SIYIClient(mock_transport, default_timeout=0.1)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.1)
         await client.connect()
 
         # First request times out
@@ -86,7 +86,7 @@ class TestSequentialCommands:
         mock_transport: MockTransport,
     ) -> None:
         """Test that sequential commands succeed."""
-        client = SIYIClient(mock_transport, default_timeout=0.5)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
         await client.connect()
 
         # Queue first response, send first command

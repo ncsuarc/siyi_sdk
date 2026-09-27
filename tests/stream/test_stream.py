@@ -49,19 +49,19 @@ class TestLifecycle:
         assert stream.fps == 0.0
 
     async def test_start_sets_running(self) -> None:
-        stream = _make_stream_with_mock([])
+        stream = _make_stream_with_mock(_make_frames(1))
         await stream.start()
         assert stream.is_running
         await stream.stop()
 
     async def test_stop_clears_running(self) -> None:
-        stream = _make_stream_with_mock([])
+        stream = _make_stream_with_mock(_make_frames(1))
         await stream.start()
         await stream.stop()
         assert not stream.is_running
 
     async def test_start_idempotent(self) -> None:
-        stream = _make_stream_with_mock([])
+        stream = _make_stream_with_mock(_make_frames(1))
         await stream.start()
         task1 = stream._task
         await stream.start()  # second call should be no-op

@@ -34,10 +34,9 @@ class TestBuildRtspUrl:
         url = build_rtsp_url(generation=CameraGeneration.OLD, stream="main")
         assert url == "rtsp://192.168.144.25:8554/main.264"
 
-    def test_old_gen_sub_ignored(self) -> None:
-        # Sub stream is not available for old-gen via RTSP; URL is same as main.
-        url = build_rtsp_url(generation=CameraGeneration.OLD, stream="sub")
-        assert url == "rtsp://192.168.144.25:8554/main.264"
+    def test_old_gen_sub_rejected(self) -> None:
+        with pytest.raises(ValueError, match="no sub stream"):
+            build_rtsp_url(generation=CameraGeneration.OLD, stream="sub")
 
     def test_custom_host(self) -> None:
         url = build_rtsp_url(host="10.0.0.1", generation=CameraGeneration.NEW)
@@ -48,7 +47,7 @@ class TestBuildRtspUrl:
         assert url == "rtsp://10.0.0.2:8554/main.264"
 
     def test_default_host_new_sub(self) -> None:
-        url = build_rtsp_url(stream="sub")
+        url = build_rtsp_url(stream="sub", generation=CameraGeneration.NEW)
         assert url == "rtsp://192.168.144.25:8554/video2"
 
 

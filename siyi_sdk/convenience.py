@@ -12,6 +12,8 @@ SIYIClient instances with UDP, TCP, or Serial transports.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.constants import DEFAULT_BAUD, DEFAULT_IP, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT
 from siyi_sdk.transport.serial import SerialTransport
@@ -26,6 +28,7 @@ async def connect_udp(
     timeout: float = 2.0,
     max_retries: int = 2,
     auto_reconnect: bool = False,
+    response_matching: Literal["sequence", "command"] = "sequence",
 ) -> SIYIClient:
     """Create and connect a SIYI client using UDP transport.
 
@@ -35,6 +38,7 @@ async def connect_udp(
         timeout: Default command timeout in seconds.
         max_retries: Maximum retry attempts for idempotent commands (0 = no retries).
         auto_reconnect: Enable automatic reconnection on failure.
+        response_matching: "sequence" (default) or "command" compatibility matching.
 
     Returns:
         Connected SIYIClient instance.
@@ -48,7 +52,13 @@ async def connect_udp(
         >>> await client.close()
     """
     transport = UDPTransport(ip=ip, port=port)
-    client = SIYIClient(transport, default_timeout=timeout, max_retries=max_retries, auto_reconnect=auto_reconnect)
+    client = SIYIClient(
+        transport,
+        default_timeout=timeout,
+        max_retries=max_retries,
+        auto_reconnect=auto_reconnect,
+        response_matching=response_matching,
+    )
     await client.connect()
     return client
 
@@ -60,6 +70,7 @@ async def connect_tcp(
     timeout: float = 2.0,
     max_retries: int = 2,
     auto_reconnect: bool = False,
+    response_matching: Literal["sequence", "command"] = "sequence",
 ) -> SIYIClient:
     """Create and connect a SIYI client using TCP transport.
 
@@ -71,6 +82,7 @@ async def connect_tcp(
         timeout: Default command timeout in seconds.
         max_retries: Maximum retry attempts for idempotent commands (0 = no retries).
         auto_reconnect: Enable automatic reconnection on failure.
+        response_matching: "sequence" (default) or "command" compatibility matching.
 
     Returns:
         Connected SIYIClient instance.
@@ -84,7 +96,13 @@ async def connect_tcp(
         >>> await client.close()
     """
     transport = TCPTransport(ip=ip, port=port)
-    client = SIYIClient(transport, default_timeout=timeout, max_retries=max_retries, auto_reconnect=auto_reconnect)
+    client = SIYIClient(
+        transport,
+        default_timeout=timeout,
+        max_retries=max_retries,
+        auto_reconnect=auto_reconnect,
+        response_matching=response_matching,
+    )
     await client.connect()
     return client
 
@@ -96,6 +114,7 @@ async def connect_serial(
     timeout: float = 2.0,
     max_retries: int = 2,
     auto_reconnect: bool = False,
+    response_matching: Literal["sequence", "command"] = "sequence",
 ) -> SIYIClient:
     """Create and connect a SIYI client using Serial transport.
 
@@ -105,6 +124,7 @@ async def connect_serial(
         timeout: Default command timeout in seconds.
         max_retries: Maximum retry attempts for idempotent commands (0 = no retries).
         auto_reconnect: Enable automatic reconnection on failure.
+        response_matching: "sequence" (default) or "command" compatibility matching.
 
     Returns:
         Connected SIYIClient instance.
@@ -118,6 +138,12 @@ async def connect_serial(
         >>> await client.close()
     """
     transport = SerialTransport(device=device, baud=baud)
-    client = SIYIClient(transport, default_timeout=timeout, max_retries=max_retries, auto_reconnect=auto_reconnect)
+    client = SIYIClient(
+        transport,
+        default_timeout=timeout,
+        max_retries=max_retries,
+        auto_reconnect=auto_reconnect,
+        response_matching=response_matching,
+    )
     await client.connect()
     return client

@@ -19,6 +19,7 @@ from typing import Final
 import structlog
 
 from ..constants import DEFAULT_IP, DEFAULT_TCP_PORT
+from ..logging_config import trace_fields
 from .base import AbstractTransport
 
 logger: Final = structlog.get_logger(__name__)
@@ -113,7 +114,7 @@ class TCPTransport(AbstractTransport):
                 transport="tcp",
                 peer=f"{self._ip}:{self._port}",
                 length=len(data),
-                data_hex=data.hex(),
+                **trace_fields(data, __name__),
             )
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             from ..exceptions import SendError
@@ -143,7 +144,7 @@ class TCPTransport(AbstractTransport):
                     "frame_rx",
                     transport="tcp",
                     length=len(data),
-                    data_hex=data.hex(),
+                    **trace_fields(data, __name__),
                 )
                 yield data
             except (ConnectionResetError, BrokenPipeError, OSError) as e:

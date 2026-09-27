@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 
 # Maximum exponential back-off delay in seconds before capping.
 _RECONNECT_DELAY_CAP: float = 30.0
@@ -55,6 +56,17 @@ class StreamBackend(str, Enum):
     AIORTSP = "aiortsp"
 
 
+class StreamState(str, Enum):
+    """Observable producer lifecycle."""
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    RECONNECTING = "reconnecting"
+    STOPPING = "stopping"
+    FAILED = "failed"
+
+
 @dataclass
 class StreamConfig:
     """Configuration for an RTSP video stream.
@@ -77,6 +89,7 @@ class StreamConfig:
     max_reconnect_attempts: int = 0
     buffer_size: int = 1
     codec: Literal["h264", "h265"] = "h264"
+    startup_timeout: float = 5.0
     # GStreamer pipeline override. When set, the GStreamer backend uses this
     # string verbatim instead of its built-in pipelines. Must include an
     # appsink named "sink" producing video/x-raw in BGR or BGRx system memory.
@@ -94,6 +107,10 @@ class StreamConfig:
             raise ValueError(f"reconnect_delay must be > 0, got {self.reconnect_delay}")
         if self.buffer_size < 1:
             raise ValueError(f"buffer_size must be >= 1, got {self.buffer_size}")
+        if self.max_reconnect_attempts < 0 or self.startup_timeout <= 0:
+            raise ValueError("Reconnect attempts must be nonnegative and startup timeout positive")
+        if self.transport not in ("tcp", "udp"):
+            raise ValueError("transport must be 'tcp' or 'udp'")
         if self.codec not in ("h264", "h265"):
             raise ValueError(f"codec must be 'h264' or 'h265', got {self.codec!r}")
 
@@ -110,7 +127,7 @@ class StreamFrame:
         backend: Name of the backend that produced this frame.
     """
 
-    frame: np.ndarray
+    frame: NDArray[np.uint8]
     timestamp: float
     width: int
     height: int
@@ -120,12 +137,12 @@ class StreamFrame:
 def build_rtsp_url(
     host: str = "192.168.144.25",
     stream: Literal["main", "sub"] = "main",
-    generation: CameraGeneration = CameraGeneration.NEW,
+    generation: CameraGeneration = CameraGeneration.OLD,
 ) -> str:
     """Return the correct RTSP URL for the given host, stream slot, and camera generation.
 
     Old-gen cameras (ZR30/ZR10/A8Mini/A2Mini/R1M) expose only a single RTSP stream via
-    ``/main.264``; the ``stream`` argument is ignored for this generation.
+    ``/main.264``; requesting a sub stream raises ValueError.
 
     New-gen cameras (ZT30/ZT6 and later) expose ``/video1`` (main) and ``/video2`` (sub).
 
@@ -143,7 +160,12 @@ def build_rtsp_url(
         >>> build_rtsp_url(generation=CameraGeneration.OLD)
         'rtsp://192.168.144.25:8554/main.264'
     """
+    generation = CameraGeneration(generation)
+    if stream not in ("main", "sub"):
+        raise ValueError("stream must be 'main' or 'sub'")
     if generation is CameraGeneration.OLD:
+        if stream != "main":
+            raise ValueError("Old-generation cameras, including A8 Mini, have no sub stream")
         return f"rtsp://{host}:8554/main.264"
     path = "video1" if stream == "main" else "video2"
     return f"rtsp://{host}:8554/{path}"

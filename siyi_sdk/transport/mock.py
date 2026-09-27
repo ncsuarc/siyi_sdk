@@ -18,6 +18,7 @@ from typing import Final
 
 import structlog
 
+from ..logging_config import trace_fields
 from .base import AbstractTransport
 
 logger: Final = structlog.get_logger(__name__)
@@ -58,6 +59,8 @@ class MockTransport(AbstractTransport):
         This sets the internal connection state to True without performing
         any actual network operations.
         """
+        if self._stream_cancelled:
+            self._response_queue = asyncio.Queue()
         self._connected = True
         self._stream_cancelled = False
         logger.info("connected", transport="mock", supports_heartbeat=self._supports_heartbeat)
@@ -96,7 +99,7 @@ class MockTransport(AbstractTransport):
             "frame_tx",
             transport="mock",
             length=len(data),
-            data_hex=data.hex(),
+            **trace_fields(data, __name__),
         )
 
     async def stream(self) -> AsyncIterator[bytes]:
@@ -109,10 +112,7 @@ class MockTransport(AbstractTransport):
             Any exception queued via queue_error().
         """
         while not self._stream_cancelled:
-            try:
-                item = await asyncio.wait_for(self._response_queue.get(), timeout=0.1)
-            except asyncio.TimeoutError:
-                continue
+            item = await self._response_queue.get()
 
             # Check for stream cancellation sentinel
             if isinstance(item, StopAsyncIteration):
@@ -128,7 +128,7 @@ class MockTransport(AbstractTransport):
                 "frame_rx",
                 transport="mock",
                 length=len(item),
-                data_hex=item.hex(),
+                **trace_fields(item, __name__),
             )
             yield item
 

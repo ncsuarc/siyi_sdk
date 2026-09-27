@@ -54,12 +54,13 @@ async def test_connect_tcp() -> None:
     """Test connect_tcp with an asyncio.start_server echo server."""
 
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        while True:
-            data = await reader.read(1024)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
+        try:
+            while data := await reader.read(1024):
+                writer.write(data)
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
     server_port = server.sockets[0].getsockname()[1]

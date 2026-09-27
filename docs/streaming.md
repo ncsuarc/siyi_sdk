@@ -28,11 +28,11 @@ network access to port 8554 on the camera IP.
 
 ```python
 import asyncio
-from siyi_sdk import SIYIStream, StreamConfig, build_rtsp_url, CameraGeneration
+from siyi_sdk import SIYIStream, StreamConfig, build_rtsp_url
 
 async def main() -> None:
     stream = SIYIStream(StreamConfig(
-        rtsp_url=build_rtsp_url(generation=CameraGeneration.NEW)
+        rtsp_url=build_rtsp_url()  # A8 Mini: rtsp://192.168.144.25:8554/main.264
     ))
 
     @stream.on_frame
@@ -115,9 +115,11 @@ url = build_rtsp_url(generation=CameraGeneration.NEW, stream="main")
 url = build_rtsp_url(generation=CameraGeneration.NEW, stream="sub")
 # → rtsp://192.168.144.25:8554/video2
 
-# Old-gen (sub argument is ignored)
-url = build_rtsp_url(generation=CameraGeneration.OLD)
+# A8 Mini / old-gen (the default)
+url = build_rtsp_url()
 # → rtsp://192.168.144.25:8554/main.264
+
+# Old-gen cameras have no RTSP sub stream; requesting one raises ValueError.
 ```
 
 ---
@@ -134,6 +136,7 @@ class StreamConfig:
     reconnect_delay: float = 2.0          # Initial back-off seconds
     max_reconnect_attempts: int = 0       # 0 = unlimited
     buffer_size: int = 1                  # OpenCV CAP_PROP_BUFFERSIZE
+    startup_timeout: float = 5.0          # Time to first decoded frame
 ```
 
 All fields are validated on construction:
@@ -150,8 +153,8 @@ back-off:
 
 ```
 initial delay = reconnect_delay (default 2.0 s)
-on each failure: delay = min(delay × 1.5, 30.0)
-on success: delay reset to reconnect_delay
+on each failure: delay = min(delay × 2, 30.0)
+after 30 healthy seconds: delay reset to reconnect_delay
 ```
 
 To limit attempts, set `max_reconnect_attempts` (0 = unlimited):
@@ -175,13 +178,17 @@ stored in the connected client:
 ```python
 # Standalone (explicit URL)
 from siyi_sdk import SIYIStream, StreamConfig
-stream = SIYIStream(StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1"))
+stream = SIYIStream(StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264"))
 
 # Via connected SIYIClient (URL derived from client's IP)
-stream = client.create_stream(stream="main", generation=CameraGeneration.NEW)
+stream = client.create_stream()  # A8 Mini main H.264 stream
 ```
 
 Both return a `SIYIStream` that must be started with `await stream.start()`.
+`start()` waits for the first decoded frame (up to `startup_timeout`). Use
+`stream.state`, `stream.is_running`, and `stream.last_error` to observe a later
+producer failure. A backend chosen explicitly reports startup failure; `AUTO`
+tries the next available backend.
 
 ---
 

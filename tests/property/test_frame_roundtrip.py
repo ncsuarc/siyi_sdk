@@ -51,7 +51,7 @@ class TestFrameRoundtrip:
         wire = original.to_bytes()
 
         parser = FrameParser()
-        frames = parser.feed(wire)
+        frames = parser.feed(wire).frames
 
         assert len(frames) == 1
         restored = frames[0]
@@ -85,7 +85,7 @@ class TestFrameRoundtrip:
 
         # Parse
         parser = FrameParser()
-        parsed = parser.feed(wire)
+        parsed = parser.feed(wire).frames
 
         assert len(parsed) == len(originals)
         for orig, restored in zip(originals, parsed, strict=True):
@@ -112,7 +112,7 @@ class TestFrameRoundtrip:
         # Feed in chunks
         for i in range(0, len(wire), chunk_size):
             chunk = wire[i : i + chunk_size]
-            frames.extend(parser.feed(chunk))
+            frames.extend(parser.feed(chunk).frames)
 
         assert len(frames) == 1
         restored = frames[0]

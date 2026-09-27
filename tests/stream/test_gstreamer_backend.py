@@ -17,10 +17,10 @@ import pytest
 
 gi = pytest.importorskip("gi")
 
-from siyi_sdk.stream.gstreamer_backend import _H264_PIPELINE, GStreamerBackend  # noqa: E402
+from siyi_sdk.stream.gstreamer_backend import _GST_AVAILABLE, GStreamerBackend  # noqa: E402
 from siyi_sdk.stream.models import StreamConfig  # noqa: E402
 
-_ = _H264_PIPELINE  # reference to avoid unused-import error when gi is available
+pytestmark = pytest.mark.skipif(not _GST_AVAILABLE, reason="Gst/GstVideo unavailable")
 
 
 @pytest.fixture
@@ -64,13 +64,15 @@ class TestGStreamerPipelineString:
         assert f"latency={config.latency_ms}" in pipeline_str
 
     def test_h265_pipeline_used(self, config: StreamConfig) -> None:
-        backend = GStreamerBackend(config, codec="h265")
-        pipeline_str = backend._build_pipeline_str()
+        with patch("siyi_sdk.stream.gstreamer_backend._IS_JETSON", True):
+            backend = GStreamerBackend(config, codec="h265")
+            pipeline_str = backend._build_pipeline_str()
         assert "rtph265depay" in pipeline_str
         assert "h265parse" in pipeline_str
 
     def test_h264_pipeline_used_by_default(self, config: StreamConfig) -> None:
-        backend = GStreamerBackend(config)
-        pipeline_str = backend._build_pipeline_str()
+        with patch("siyi_sdk.stream.gstreamer_backend._IS_JETSON", True):
+            backend = GStreamerBackend(config)
+            pipeline_str = backend._build_pipeline_str()
         assert "rtph264depay" in pipeline_str
         assert "h264parse" in pipeline_str

@@ -16,11 +16,12 @@ from __future__ import annotations
 
 from .crc import crc16, crc16_check
 from .frame import Frame
-from .parser import FrameParser
+from .parser import FrameParser, ParseResult
 
 __all__ = [
     "Frame",
     "FrameParser",
+    "ParseResult",
     "crc16",
     "crc16_check",
 ]

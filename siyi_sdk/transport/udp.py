@@ -13,12 +13,13 @@ UDP does not require heartbeat frames.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from ..constants import DEFAULT_IP, DEFAULT_UDP_PORT
+from ..logging_config import trace_fields
 from .base import AbstractTransport
 
 if TYPE_CHECKING:
@@ -30,13 +31,17 @@ logger: Final = structlog.get_logger(__name__)
 class _DatagramProtocol(asyncio.DatagramProtocol):
     """Internal datagram protocol handler."""
 
-    def __init__(self, queue: asyncio.Queue[bytes]) -> None:
+    def __init__(
+        self, queue: asyncio.Queue[bytes | Exception | None], on_loss: Callable[[], None]
+    ) -> None:
         """Initialize the protocol.
 
         Args:
             queue: Queue to push received datagrams into.
+            on_loss: Callback marking this endpoint disconnected.
         """
         self._queue = queue
+        self._on_loss = on_loss
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         """Handle received datagram.
@@ -49,6 +54,19 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
             self._queue.put_nowait(data)
         except asyncio.QueueFull:
             logger.warning("udp_queue_full", dropped_bytes=len(data))
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._on_loss()
+        self._wake(exc)
+
+    def error_received(self, exc: Exception) -> None:
+        self._on_loss()
+        self._wake(exc)
+
+    def _wake(self, exc: Exception | None) -> None:
+        if self._queue.full():
+            self._queue.get_nowait()
+        self._queue.put_nowait(exc)
 
 
 class UDPTransport(AbstractTransport):
@@ -84,7 +102,7 @@ class UDPTransport(AbstractTransport):
         self._bind_port: int | None = bind_port
         self._connected: bool = False
         self._transport: DatagramTransport | None = None
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        self._queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue(maxsize=100)
         self._stream_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
@@ -93,12 +111,16 @@ class UDPTransport(AbstractTransport):
         Raises:
             ConnectionError: If endpoint creation fails.
         """
+        if self._connected:
+            return
+        self._queue = asyncio.Queue(maxsize=100)
+        queue = self._queue
         loop = asyncio.get_running_loop()
 
         try:
             local_addr = ("0.0.0.0", self._bind_port) if self._bind_port else None
             transport, _ = await loop.create_datagram_endpoint(
-                lambda: _DatagramProtocol(self._queue),
+                lambda: _DatagramProtocol(queue, lambda: self._mark_lost(queue)),
                 remote_addr=(self._ip, self._port),
                 local_addr=local_addr,
             )
@@ -115,6 +137,10 @@ class UDPTransport(AbstractTransport):
 
             raise ConnError(f"Failed to create UDP endpoint: {e}") from e
 
+    def _mark_lost(self, queue: asyncio.Queue[bytes | Exception | None]) -> None:
+        if queue is self._queue:
+            self._connected = False
+
     async def close(self) -> None:
         """Close the UDP connection."""
         if self._transport:
@@ -130,6 +156,7 @@ class UDPTransport(AbstractTransport):
             except asyncio.QueueEmpty:
                 break
 
+        self._queue.put_nowait(None)
         logger.info("disconnected", transport="udp")
 
     async def send(self, data: bytes) -> None:
@@ -154,7 +181,7 @@ class UDPTransport(AbstractTransport):
                 transport="udp",
                 peer=f"{self._ip}:{self._port}",
                 length=len(data),
-                data_hex=data.hex(),
+                **trace_fields(data, __name__),
             )
         except OSError as e:
             from ..exceptions import SendError
@@ -167,18 +194,17 @@ class UDPTransport(AbstractTransport):
         Yields:
             bytes: Received datagram data.
         """
-        while self._connected:
-            try:
-                data = await asyncio.wait_for(self._queue.get(), timeout=0.1)
-                logger.debug(
-                    "frame_rx",
-                    transport="udp",
-                    length=len(data),
-                    data_hex=data.hex(),
-                )
-                yield data
-            except asyncio.TimeoutError:
-                continue
+        queue = self._queue
+        while True:
+            data = await queue.get()
+            if data is None:
+                return
+            if isinstance(data, Exception):
+                raise data
+            logger.debug(
+                "frame_rx", transport="udp", length=len(data), **trace_fields(data, __name__)
+            )
+            yield data
 
     @property
     def is_connected(self) -> bool:

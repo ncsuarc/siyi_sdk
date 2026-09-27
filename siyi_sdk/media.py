@@ -59,20 +59,23 @@ class MediaClient:
         port: int = DEFAULT_HTTP_PORT,
         timeout: float = 5.0,
     ) -> None:
+        """Configure the camera's media HTTP endpoint."""
         self._base = f"http://{host}:{port}{_BASE_PATH}"
         self._timeout = timeout
 
     async def __aenter__(self) -> MediaClient:
+        """Enter the media client context."""
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        """Exit the context; requests own and close their HTTP connections."""
         pass
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get(self, path: str, params: dict[str, Any]) -> Any:
+    def _get(self, path: str, params: dict[str, Any]) -> Any:  # noqa: ANN401 - JSON response
         url = f"{self._base}{path}?{urllib.parse.urlencode(params)}"
         log.debug("media_http_request", url=url)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -90,14 +93,16 @@ class MediaClient:
 
         return body.get("data", {})
 
-    async def _aget(self, path: str, params: dict[str, Any]) -> Any:
+    async def _aget(self, path: str, params: dict[str, Any]) -> Any:  # noqa: ANN401 - JSON response
         return await asyncio.to_thread(self._get, path, params)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def list_directories(self, media_type: MediaType = MediaType.IMAGES) -> list[MediaDirectory]:
+    async def list_directories(
+        self, media_type: MediaType = MediaType.IMAGES
+    ) -> list[MediaDirectory]:
         """Return the date-based directories for the given media type.
 
         Args:
@@ -130,7 +135,9 @@ class MediaClient:
         Raises:
             TransportError: On HTTP failure or API-level error.
         """
-        data = await self._aget("/api/v1/getmediacount", {"media_type": int(media_type), "path": path})
+        data = await self._aget(
+            "/api/v1/getmediacount", {"media_type": int(media_type), "path": path}
+        )
         return int(data.get("count", 0))
 
     async def list_files(

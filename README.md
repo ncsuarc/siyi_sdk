@@ -63,17 +63,25 @@ Expected output:
 ```
 10:07:33 [info     ] transport_connected            transport=UDPTransport
 Camera FW: v3.2.1, Gimbal FW: v3.2.1, Zoom FW: v3.2.1
-10:07:33 [info     ] rx_ack                         cmd_id=0x01 payload_len=12 seq=0
 Yaw=0.0°  Pitch=0.0°  Roll=0.0°
 10:07:33 [info     ] client_closed
 ```
 
 See [docs/quickstart.md](docs/quickstart.md) for UDP, TCP, and Serial examples.
+Responses match both command ID and sequence by default. If a camera firmware
+does not echo request sequences, pass `response_matching="command"` to the
+connection factory; that compatibility mode cannot reliably reject delayed
+replies for repeated commands. A8 Mini sequence behavior still needs a physical
+camera check.
 
 ## Video Streaming
 
 The SDK includes a `siyi_sdk.stream` sub-package for receiving live RTSP video from SIYI
 cameras. It auto-selects the best available backend (GStreamer → aiortsp → OpenCV).
+For the A8 Mini, `build_rtsp_url()` and `client.create_stream()` default to the
+H.264 main stream at `rtsp://192.168.144.25:8554/main.264`; the old-generation
+camera URL has no RTSP sub stream. Stream startup waits for a decoded frame,
+and `stream.state` and `stream.last_error` report later failures.
 
 ### Installation
 

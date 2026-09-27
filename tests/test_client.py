@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 from ipaddress import IPv4Address
 
 import pytest
@@ -92,7 +93,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_context_manager(self, mock_transport: MockTransport) -> None:
         """Test async context manager usage."""
-        async with SIYIClient(mock_transport) as client:
+        async with SIYIClient(mock_transport, response_matching="command") as client:
             assert mock_transport.is_connected
             assert client._reader_task is not None
 
@@ -102,7 +103,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_manual_connect_close(self, mock_transport: MockTransport) -> None:
         """Test manual connect/close lifecycle."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         assert not mock_transport.is_connected
 
         await client.connect()
@@ -114,7 +115,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_heartbeat_started_for_tcp(self, mock_transport_tcp: MockTransport) -> None:
         """Test heartbeat task is started for TCP transports."""
-        client = SIYIClient(mock_transport_tcp)
+        client = SIYIClient(mock_transport_tcp, response_matching="command")
         await client.connect()
 
         assert client._heartbeat_task is not None
@@ -125,7 +126,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_heartbeat_not_started_for_udp(self, mock_transport: MockTransport) -> None:
         """Test heartbeat task is not started for UDP transports."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         assert client._heartbeat_task is None
@@ -135,7 +136,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_heartbeat_sends_frames(self, mock_transport_tcp: MockTransport) -> None:
         """Test heartbeat task sends 3 frames in 3.1 seconds."""
-        client = SIYIClient(mock_transport_tcp)
+        client = SIYIClient(mock_transport_tcp, response_matching="command")
         await client.connect()
 
         # Wait for 3.1 seconds
@@ -152,7 +153,7 @@ class TestClientLifecycle:
     @pytest.mark.asyncio
     async def test_no_heartbeat_for_udp(self, mock_transport: MockTransport) -> None:
         """Test no heartbeat frames for UDP transport."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         await asyncio.sleep(3.1)
@@ -172,7 +173,7 @@ class TestSequenceNumber:
     @pytest.mark.asyncio
     async def test_seq_increment(self, mock_transport: MockTransport) -> None:
         """Test sequence numbers increment correctly."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
 
         seq1 = client._next_seq()
         seq2 = client._next_seq()
@@ -185,7 +186,7 @@ class TestSequenceNumber:
     @pytest.mark.asyncio
     async def test_seq_wrap(self, mock_transport: MockTransport) -> None:
         """Test sequence number wraps at 0xFFFF."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         client._seq = 0xFFFE
 
         seq1 = client._next_seq()
@@ -199,7 +200,7 @@ class TestSequenceNumber:
     @pytest.mark.asyncio
     async def test_seq_uniqueness_70k(self, mock_transport: MockTransport) -> None:
         """Test 70,000 sequence numbers cover all 16-bit values."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
 
         seqs = [client._next_seq() for _ in range(70000)]
 
@@ -214,7 +215,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_get_firmware_version(self, mock_transport: MockTransport) -> None:
         """Test get_firmware_version happy path."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK response
@@ -233,7 +234,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_timeout_raises_error(self, mock_transport: MockTransport) -> None:
         """Test timeout raises TimeoutError."""
-        client = SIYIClient(mock_transport, default_timeout=0.1)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.1)
         await client.connect()
 
         # Do not queue a response
@@ -249,7 +250,9 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_retry_on_idempotent_read(self, mock_transport: MockTransport) -> None:
         """Test idempotent reads retry on timeout."""
-        client = SIYIClient(mock_transport, default_timeout=0.1, max_retries=1)
+        client = SIYIClient(
+            mock_transport, response_matching="command", default_timeout=0.1, max_retries=1
+        )
         await client.connect()
 
         # Queue response after both attempts would have been sent
@@ -274,7 +277,9 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_no_retry_on_write(self, mock_transport: MockTransport) -> None:
         """Test write commands do not retry on timeout."""
-        client = SIYIClient(mock_transport, default_timeout=0.1, max_retries=1)
+        client = SIYIClient(
+            mock_transport, response_matching="command", default_timeout=0.1, max_retries=1
+        )
         await client.connect()
 
         # Do not queue response
@@ -286,7 +291,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_concurrent_same_cmd_id(self, mock_transport: MockTransport) -> None:
         """Test concurrent requests with same CMD_ID are serialized."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue responses with a delay to ensure requests are sent first
@@ -323,7 +328,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_concurrent_different_cmd_id(self, mock_transport: MockTransport) -> None:
         """Test concurrent requests with different CMD_IDs execute in parallel."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue responses with a delay
@@ -358,7 +363,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_fire_and_forget_capture(self, mock_transport: MockTransport) -> None:
         """Test fire-and-forget commands do not wait for ACK."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Do not queue response
@@ -376,7 +381,7 @@ class TestCommandExecution:
         self, mock_transport: MockTransport
     ) -> None:
         """Test send_aircraft_attitude is fire-and-forget."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         att = AircraftAttitude(
@@ -399,7 +404,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_fire_and_forget_send_rc_channels(self, mock_transport: MockTransport) -> None:
         """Test send_rc_channels is fire-and-forget."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         ch = RCChannels(chans=tuple([1500] * 18), chancount=16, rssi=200)
@@ -415,7 +420,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_fire_and_forget_send_raw_gps(self, mock_transport: MockTransport) -> None:
         """Test send_raw_gps is fire-and-forget."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         gps = RawGPS(
@@ -443,7 +448,7 @@ class TestStreamSubscriptions:
     @pytest.mark.asyncio
     async def test_on_attitude_subscription(self, mock_transport: MockTransport) -> None:
         """Test attitude stream subscription."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         received: list[GimbalAttitude] = []
@@ -481,7 +486,7 @@ class TestStreamSubscriptions:
     @pytest.mark.asyncio
     async def test_on_laser_distance_subscription(self, mock_transport: MockTransport) -> None:
         """Test laser distance stream subscription."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         received: list[LaserDistance] = []
@@ -508,7 +513,7 @@ class TestStreamSubscriptions:
     @pytest.mark.asyncio
     async def test_on_function_feedback_subscription(self, mock_transport: MockTransport) -> None:
         """Test function feedback stream subscription."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         received: list[FunctionFeedback] = []
@@ -535,7 +540,7 @@ class TestStreamSubscriptions:
     @pytest.mark.asyncio
     async def test_on_ai_tracking_subscription(self, mock_transport: MockTransport) -> None:
         """Test AI tracking stream subscription."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         received: list[AITrackingTarget] = []
@@ -567,7 +572,7 @@ class TestUnexpectedFrames:
         self, mock_transport: MockTransport, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Test unknown CMD_ID is logged as warning."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue a frame with unknown CMD_ID
@@ -589,7 +594,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_get_hardware_id(self, mock_transport: MockTransport) -> None:
         """Test get_hardware_id."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -607,7 +612,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_get_system_time(self, mock_transport: MockTransport) -> None:
         """Test get_system_time."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -624,7 +629,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_set_utc_time(self, mock_transport: MockTransport) -> None:
         """Test set_utc_time."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -641,7 +646,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_get_gimbal_system_info(self, mock_transport: MockTransport) -> None:
         """Test get_gimbal_system_info."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -659,7 +664,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_soft_reboot(self, mock_transport: MockTransport) -> None:
         """Test soft_reboot."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -677,7 +682,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_get_ip_config(self, mock_transport: MockTransport) -> None:
         """Test get_ip_config."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (12 bytes: 3x IPv4 addresses as little-endian uint32)
@@ -702,7 +707,7 @@ class TestSystemCommands:
     @pytest.mark.asyncio
     async def test_set_ip_config(self, mock_transport: MockTransport) -> None:
         """Test set_ip_config."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -727,7 +732,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_auto_focus(self, mock_transport: MockTransport) -> None:
         """Test auto_focus."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -742,7 +747,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_manual_zoom(self, mock_transport: MockTransport) -> None:
         """Test manual_zoom."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: zoom = 5.3x)
@@ -759,7 +764,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_manual_focus(self, mock_transport: MockTransport) -> None:
         """Test manual_focus."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -774,7 +779,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_absolute_zoom(self, mock_transport: MockTransport) -> None:
         """Test absolute_zoom."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -789,7 +794,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_get_zoom_range(self, mock_transport: MockTransport) -> None:
         """Test get_zoom_range."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: max = 30.5x)
@@ -807,7 +812,7 @@ class TestFocusZoomCommands:
     @pytest.mark.asyncio
     async def test_get_current_zoom(self, mock_transport: MockTransport) -> None:
         """Test get_current_zoom."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: zoom = 8.2x)
@@ -828,7 +833,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_rotate(self, mock_transport: MockTransport) -> None:
         """Test rotate."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -843,7 +848,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_one_key_centering(self, mock_transport: MockTransport) -> None:
         """Test one_key_centering."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -858,7 +863,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_set_attitude(self, mock_transport: MockTransport) -> None:
         """Test set_attitude."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes: yaw, pitch, roll each int16)
@@ -875,7 +880,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_set_single_axis(self, mock_transport: MockTransport) -> None:
         """Test set_single_axis."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes)
@@ -892,7 +897,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_rotate_nowait(self, mock_transport: MockTransport) -> None:
         """rotate_nowait sends a 0x07 frame with CTRL=0 and does not wait for ACK."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Note: no queue_response — fire-and-forget must not block.
@@ -908,13 +913,11 @@ class TestGimbalCommands:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_rotate_nowait_range_validation(
-        self, mock_transport: MockTransport
-    ) -> None:
+    async def test_rotate_nowait_range_validation(self, mock_transport: MockTransport) -> None:
         """rotate_nowait still validates the -100..100 range."""
         from siyi_sdk.exceptions import ConfigurationError
 
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         with pytest.raises(ConfigurationError):
@@ -928,15 +931,13 @@ class TestGimbalCommands:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_rotate_nowait_high_rate_throughput(
-        self, mock_transport: MockTransport
-    ) -> None:
+    async def test_rotate_nowait_high_rate_throughput(self, mock_transport: MockTransport) -> None:
         """Many back-to-back fire-and-forget rotates must not deadlock.
 
         The standard rotate() serialises on a per-CMD_ID lock waiting for
         ACKs; rotate_nowait() must bypass that and accept a burst.
         """
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         for i in range(200):
@@ -952,7 +953,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_set_attitude_nowait(self, mock_transport: MockTransport) -> None:
         """set_attitude_nowait sends a 0x0E frame with CTRL=0."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         await client.set_attitude_nowait(45.0, -30.0)
@@ -967,11 +968,9 @@ class TestGimbalCommands:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_set_single_axis_nowait_yaw(
-        self, mock_transport: MockTransport
-    ) -> None:
+    async def test_set_single_axis_nowait_yaw(self, mock_transport: MockTransport) -> None:
         """set_single_axis_nowait('yaw', ...) sends 0x41 with axis byte = 0."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         await client.set_single_axis_nowait("yaw", 90.0)
@@ -983,11 +982,9 @@ class TestGimbalCommands:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_set_single_axis_nowait_pitch(
-        self, mock_transport: MockTransport
-    ) -> None:
+    async def test_set_single_axis_nowait_pitch(self, mock_transport: MockTransport) -> None:
         """set_single_axis_nowait('pitch', ...) sends 0x41 with axis byte = 1."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         await client.set_single_axis_nowait("pitch", -45.0)
@@ -1001,7 +998,7 @@ class TestGimbalCommands:
     @pytest.mark.asyncio
     async def test_get_gimbal_mode(self, mock_transport: MockTransport) -> None:
         """Test get_gimbal_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (1 byte: mode = LOCK)
@@ -1022,7 +1019,7 @@ class TestAttitudeStreamCommands:
     @pytest.mark.asyncio
     async def test_get_gimbal_attitude(self, mock_transport: MockTransport) -> None:
         """Test get_gimbal_attitude."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (12 bytes)
@@ -1039,7 +1036,7 @@ class TestAttitudeStreamCommands:
     @pytest.mark.asyncio
     async def test_request_fc_stream(self, mock_transport: MockTransport) -> None:
         """Test request_fc_stream."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1050,14 +1047,14 @@ class TestAttitudeStreamCommands:
         await client.request_fc_stream(FCDataType.ATTITUDE, DataStreamFreq.HZ10)
 
         # Check active streams
-        assert FCDataType.ATTITUDE in client._active_streams
+        assert FCDataType.ATTITUDE in client._fc_streams
 
         await client.close()
 
     @pytest.mark.asyncio
     async def test_request_gimbal_stream(self, mock_transport: MockTransport) -> None:
         """Test request_gimbal_stream."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1068,14 +1065,14 @@ class TestAttitudeStreamCommands:
         await client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ5)
 
         # Check active streams
-        assert GimbalDataType.ATTITUDE in client._active_streams
+        assert GimbalDataType.ATTITUDE in client._gimbal_streams
 
         await client.close()
 
     @pytest.mark.asyncio
     async def test_get_magnetic_encoder(self, mock_transport: MockTransport) -> None:
         """Test get_magnetic_encoder."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes)
@@ -1096,7 +1093,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_get_camera_system_info(self, mock_transport: MockTransport) -> None:
         """Test get_camera_system_info."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (8 bytes)
@@ -1113,11 +1110,11 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_get_encoding_params(self, mock_transport: MockTransport) -> None:
         """Test get_encoding_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (11 bytes)
-        ack_payload = b"\x01\x01\x00\x05\x00\x04\x00\x00\x80\x00\x1e"
+        ack_payload = struct.pack("<BBHHHB", 1, 1, 1280, 1024, 128, 30)
         ack_frame = Frame.build(0x20, ack_payload, seq=0, need_ack=False)
         mock_transport.queue_response(ack_frame.to_bytes())
 
@@ -1130,7 +1127,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_set_encoding_params(self, mock_transport: MockTransport) -> None:
         """Test set_encoding_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: sta, enc_type)
@@ -1156,7 +1153,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_format_sd_card(self, mock_transport: MockTransport) -> None:
         """Test format_sd_card."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1173,7 +1170,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_get_picture_name_type(self, mock_transport: MockTransport) -> None:
         """Test get_picture_name_type."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: file_type, file_name_type)
@@ -1190,11 +1187,11 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_set_picture_name_type(self, mock_transport: MockTransport) -> None:
         """Test set_picture_name_type."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: sta, file_name_type)
-        ack_payload = b"\x01\x02"
+        ack_payload = b"\x00\x02"
         ack_frame = Frame.build(0x4A, ack_payload, seq=0, need_ack=False)
         mock_transport.queue_response(ack_frame.to_bytes())
 
@@ -1205,7 +1202,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_get_osd_flag(self, mock_transport: MockTransport) -> None:
         """Test get_osd_flag."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1222,7 +1219,7 @@ class TestCameraCommands:
     @pytest.mark.asyncio
     async def test_set_osd_flag(self, mock_transport: MockTransport) -> None:
         """Test set_osd_flag."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1243,7 +1240,7 @@ class TestVideoCommands:
     @pytest.mark.asyncio
     async def test_get_video_stitching_mode(self, mock_transport: MockTransport) -> None:
         """Test get_video_stitching_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1260,7 +1257,7 @@ class TestVideoCommands:
     @pytest.mark.asyncio
     async def test_set_video_stitching_mode(self, mock_transport: MockTransport) -> None:
         """Test set_video_stitching_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1281,7 +1278,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_temp_at_point(self, mock_transport: MockTransport) -> None:
         """Test temp_at_point."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes: temp, x, y)
@@ -1301,7 +1298,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_temp_region(self, mock_transport: MockTransport) -> None:
         """Test temp_region."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (20 bytes)
@@ -1318,7 +1315,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_temp_global(self, mock_transport: MockTransport) -> None:
         """Test temp_global."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (12 bytes)
@@ -1335,7 +1332,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_pseudo_color(self, mock_transport: MockTransport) -> None:
         """Test get_pseudo_color."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1352,7 +1349,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_pseudo_color(self, mock_transport: MockTransport) -> None:
         """Test set_pseudo_color."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1369,7 +1366,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_thermal_output_mode(self, mock_transport: MockTransport) -> None:
         """Test get_thermal_output_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1386,7 +1383,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_thermal_output_mode(self, mock_transport: MockTransport) -> None:
         """Test set_thermal_output_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1403,7 +1400,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_single_temp_frame(self, mock_transport: MockTransport) -> None:
         """Test get_single_temp_frame."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1420,7 +1417,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_thermal_gain(self, mock_transport: MockTransport) -> None:
         """Test get_thermal_gain."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1437,7 +1434,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_thermal_gain(self, mock_transport: MockTransport) -> None:
         """Test set_thermal_gain."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1454,7 +1451,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_env_correction_params(self, mock_transport: MockTransport) -> None:
         """Test get_env_correction_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (10 bytes)
@@ -1471,7 +1468,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_env_correction_params(self, mock_transport: MockTransport) -> None:
         """Test set_env_correction_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1496,7 +1493,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_env_correction_switch(self, mock_transport: MockTransport) -> None:
         """Test get_env_correction_switch."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1513,7 +1510,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_env_correction_switch(self, mock_transport: MockTransport) -> None:
         """Test set_env_correction_switch."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1530,7 +1527,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_ir_thresh_map_state(self, mock_transport: MockTransport) -> None:
         """Test get_ir_thresh_map_state."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1547,7 +1544,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_ir_thresh_map_state(self, mock_transport: MockTransport) -> None:
         """Test set_ir_thresh_map_state."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1564,7 +1561,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_ir_thresh_params(self, mock_transport: MockTransport) -> None:
         """Test get_ir_thresh_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (24 bytes: 3 regions * 8 bytes each)
@@ -1581,7 +1578,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_ir_thresh_params(self, mock_transport: MockTransport) -> None:
         """Test set_ir_thresh_params."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1603,7 +1600,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_get_ir_thresh_precision(self, mock_transport: MockTransport) -> None:
         """Test get_ir_thresh_precision."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1620,7 +1617,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_set_ir_thresh_precision(self, mock_transport: MockTransport) -> None:
         """Test set_ir_thresh_precision."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1637,7 +1634,7 @@ class TestThermalCommands:
     @pytest.mark.asyncio
     async def test_manual_thermal_shutter(self, mock_transport: MockTransport) -> None:
         """Test manual_thermal_shutter."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1658,7 +1655,7 @@ class TestLaserCommands:
     @pytest.mark.asyncio
     async def test_get_laser_distance(self, mock_transport: MockTransport) -> None:
         """Test get_laser_distance."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: raw = 1000 -> 100.0m)
@@ -1676,7 +1673,7 @@ class TestLaserCommands:
     @pytest.mark.asyncio
     async def test_get_laser_target_latlon(self, mock_transport: MockTransport) -> None:
         """Test get_laser_target_latlon."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (8 bytes: lat_e7, lon_e7)
@@ -1693,7 +1690,7 @@ class TestLaserCommands:
     @pytest.mark.asyncio
     async def test_set_laser_ranging_state(self, mock_transport: MockTransport) -> None:
         """Test set_laser_ranging_state."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1714,7 +1711,7 @@ class TestAICommands:
     @pytest.mark.asyncio
     async def test_get_ai_mode(self, mock_transport: MockTransport) -> None:
         """Test get_ai_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1731,7 +1728,7 @@ class TestAICommands:
     @pytest.mark.asyncio
     async def test_get_ai_stream_status(self, mock_transport: MockTransport) -> None:
         """Test get_ai_stream_status."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1748,7 +1745,7 @@ class TestAICommands:
     @pytest.mark.asyncio
     async def test_set_ai_stream_output(self, mock_transport: MockTransport) -> None:
         """Test set_ai_stream_output."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1769,7 +1766,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_get_control_mode(self, mock_transport: MockTransport) -> None:
         """Test get_control_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1786,7 +1783,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_get_weak_threshold(self, mock_transport: MockTransport) -> None:
         """Test get_weak_threshold."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes)
@@ -1803,7 +1800,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_set_weak_threshold(self, mock_transport: MockTransport) -> None:
         """Test set_weak_threshold."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1822,7 +1819,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_get_motor_voltage(self, mock_transport: MockTransport) -> None:
         """Test get_motor_voltage."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (6 bytes)
@@ -1839,7 +1836,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_get_weak_control_mode(self, mock_transport: MockTransport) -> None:
         """Test get_weak_control_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK
@@ -1856,7 +1853,7 @@ class TestDebugCommands:
     @pytest.mark.asyncio
     async def test_set_weak_control_mode(self, mock_transport: MockTransport) -> None:
         """Test set_weak_control_mode."""
-        client = SIYIClient(mock_transport)
+        client = SIYIClient(mock_transport, response_matching="command")
         await client.connect()
 
         # Queue ACK (2 bytes: sta, weak_mode_state)

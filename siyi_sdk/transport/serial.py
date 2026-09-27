@@ -19,6 +19,7 @@ from typing import Final
 import structlog
 
 from ..constants import DEFAULT_BAUD
+from ..logging_config import trace_fields
 from .base import AbstractTransport
 
 logger: Final = structlog.get_logger(__name__)
@@ -122,7 +123,7 @@ class SerialTransport(AbstractTransport):
                 transport="serial",
                 device=self._device,
                 length=len(data),
-                data_hex=data.hex(),
+                **trace_fields(data, __name__),
             )
         except (OSError, AttributeError) as e:
             from ..exceptions import SendError
@@ -153,7 +154,7 @@ class SerialTransport(AbstractTransport):
                     transport="serial",
                     device=self._device,
                     length=len(data),
-                    data_hex=data.hex(),
+                    **trace_fields(data, __name__),
                 )
                 yield data
             except (OSError, AttributeError) as e:

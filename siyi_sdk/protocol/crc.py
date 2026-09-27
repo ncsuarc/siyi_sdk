@@ -17,7 +17,9 @@ Algorithm: CRC-16/XMODEM
 
 from __future__ import annotations
 
-from ..constants import CRC16_INIT, CRC16_TABLE
+from binascii import crc_hqx
+
+from ..constants import CRC16_INIT
 
 
 def crc16(buf: bytes, init: int = CRC16_INIT) -> int:
@@ -39,11 +41,7 @@ def crc16(buf: bytes, init: int = CRC16_INIT) -> int:
         '0xc464'
 
     """
-    crc = init
-    for b in buf:
-        temp = (crc >> 8) & 0xFF
-        crc = ((crc << 8) & 0xFFFF) ^ CRC16_TABLE[b ^ temp]
-    return crc
+    return crc_hqx(buf, init)
 
 
 def crc16_check(frame_without_crc: bytes, crc_le: bytes) -> bool:

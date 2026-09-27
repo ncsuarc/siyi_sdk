@@ -19,6 +19,15 @@ import structlog
 if TYPE_CHECKING:
     pass
 
+_TRACE_ENABLED = False
+
+
+def trace_fields(data: bytes, name: str) -> dict[str, str]:
+    """Avoid even constructing hex strings outside enabled protocol tracing."""
+    if _TRACE_ENABLED and logging.getLogger(name).isEnabledFor(logging.DEBUG):
+        return {"data_hex": data.hex()}
+    return {}
+
 
 def hexdump_processor(
     logger: object,
@@ -85,6 +94,8 @@ def configure_logging(
     # Determine trace mode
     if trace is None:
         trace = os.environ.get("SIYI_PROTOCOL_TRACE") == "1"
+    global _TRACE_ENABLED
+    _TRACE_ENABLED = trace
 
     # Determine log level
     if level is None:
@@ -105,6 +116,7 @@ def configure_logging(
     processors: list[
         Callable[[Any, str, MutableMapping[str, Any]], Mapping[str, Any] | str | bytes]
     ] = [
+        structlog.stdlib.filter_by_level,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="%H:%M:%S" if fmt == "console" else "iso", utc=False),
     ]
@@ -122,6 +134,7 @@ def configure_logging(
         )
 
     structlog.configure(
+        wrapper_class=structlog.stdlib.BoundLogger,
         processors=processors,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),

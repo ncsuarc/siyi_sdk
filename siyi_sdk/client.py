@@ -18,10 +18,9 @@ of communication with SIYI gimbal cameras including:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
 import structlog
 
@@ -40,12 +39,9 @@ from siyi_sdk.constants import (
     HEARTBEAT_FRAME,
 )
 from siyi_sdk.exceptions import (
-    CRCError,
     ConnectionError,
-    FramingError,
     NotConnectedError,
     TimeoutError,
-    UnknownCommandError,
 )
 from siyi_sdk.models import (
     AircraftAttitude,
@@ -97,6 +93,8 @@ from siyi_sdk.transport.base import AbstractTransport, Unsubscribe
 
 if TYPE_CHECKING:
     from siyi_sdk.stream import SIYIStream
+
+_T = TypeVar("_T")
 
 logger: Final = structlog.get_logger(__name__)
 
@@ -191,6 +189,7 @@ class SIYIClient:
         max_retries: int = 2,
         retry_base_delay: float = 0.1,
         auto_reconnect: bool = False,
+        response_matching: Literal["sequence", "command"] = "sequence",
     ) -> None:
         """Initialize the SIYI client.
 
@@ -200,7 +199,16 @@ class SIYIClient:
             max_retries: Maximum retries for idempotent reads.
             retry_base_delay: Base delay for exponential backoff.
             auto_reconnect: Enable automatic reconnection.
+            response_matching: Match command and sequence, or command only for compatibility.
         """
+        if response_matching not in ("sequence", "command"):
+            raise ValueError("response_matching must be 'sequence' or 'command'")
+        self._response_matching = response_matching
+        self._lifecycle_lock = asyncio.Lock()
+        self._closing = False
+        self._supervisor_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
+        self._pending_meta: dict[int, tuple[int, bytes]] = {}
         self._transport = transport
         self._default_timeout = default_timeout
         self._max_retries = max_retries
@@ -223,7 +231,8 @@ class SIYIClient:
         self._ai_tracking_callbacks: list[Callable[[AITrackingTarget], None]] = []
 
         # Active stream subscriptions (for replay on reconnect)
-        self._active_streams: dict[GimbalDataType | FCDataType, DataStreamFreq] = {}
+        self._fc_streams: dict[FCDataType, DataStreamFreq] = {}
+        self._gimbal_streams: dict[GimbalDataType, DataStreamFreq] = {}
 
         # Background tasks
         self._reader_task: asyncio.Task[None] | None = None
@@ -253,67 +262,136 @@ class SIYIClient:
         await self.close()
 
     async def connect(self) -> None:
-        """Establish connection to the device.
-
-        This method connects the transport and starts background tasks
-        (reader loop and heartbeat if applicable).
-
-        Raises:
-            ConnectionError: If connection cannot be established.
-        """
-        if self._transport.is_connected:
-            return
-        await self._transport.connect()
-        self._logger.info("transport_connected", transport=type(self._transport).__name__)
-
-        # Start reader loop
-        self._reader_task = asyncio.create_task(self._reader())
-
-        # Start heartbeat if supported by transport
-        if self._transport.supports_heartbeat:
-            self._heartbeat_task = asyncio.create_task(self._heartbeat())
-            self._logger.info("heartbeat_started")
-
-        self.connection_event.set()
+        """Connect and start one supervised reader/heartbeat pair."""
+        async with self._lifecycle_lock:
+            if self.connection_event.is_set():
+                return
+            if self._supervisor_task and not self._supervisor_task.done():
+                raise NotConnectedError("Client is reconnecting")
+            self._closing = False
+            try:
+                await self._open_session(replay=True)
+            except BaseException:
+                await self._cleanup_session()
+                raise
+            self._supervisor_task = asyncio.create_task(self._supervise(), name="siyi-supervisor")
 
     async def close(self) -> None:
-        """Close the connection and release resources.
+        """Idempotently release the transport even when background tasks fail."""
+        self._closing = True
+        self.connection_event.clear()
+        if self._close_task is None or self._close_task.done():
+            self._close_task = asyncio.create_task(self._shutdown(), name="siyi-close")
+        await asyncio.shield(self._close_task)
 
-        This method cancels background tasks, drains pending requests,
-        and closes the transport.
-        """
-        # Cancel background tasks
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._heartbeat_task
-            self._heartbeat_task = None
+    async def _shutdown(self) -> None:
+        async with self._lifecycle_lock:
+            self._closing = True
+            self.connection_event.clear()
+            supervisor = self._supervisor_task
+            if supervisor is not None:
+                supervisor.cancel()
+                await asyncio.gather(supervisor, return_exceptions=True)
+                self._supervisor_task = None
+            await self._cleanup_session()
 
-        if self._reader_task:
-            self._reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._reader_task
-            self._reader_task = None
+    async def _open_session(self, *, replay: bool) -> None:
+        self.connection_event.clear()
+        self._parser.reset()
+        await self._transport.connect()
+        self._reader_task = asyncio.create_task(self._reader(), name="siyi-reader")
+        if self._transport.supports_heartbeat:
+            self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="siyi-heartbeat")
+        if replay and (self._fc_streams or self._gimbal_streams):
+            replay_task = asyncio.create_task(self._replay_subscriptions())
+            watched = [replay_task, self._reader_task]
+            if self._heartbeat_task is not None:
+                watched.append(self._heartbeat_task)
+            try:
+                done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+                if self._reader_task in done or self._heartbeat_task in done:
+                    raise ConnectionError("Connection lost during subscription replay")
+                await replay_task
+            finally:
+                replay_task.cancel()
+                await asyncio.gather(replay_task, return_exceptions=True)
+        if self._reader_task.done() or (self._heartbeat_task and self._heartbeat_task.done()):
+            raise ConnectionError("Connection lost during subscription replay")
+        self.connection_event.set()
 
-        # Cancel pending requests
-        for fut in self._pending.values():
+    async def _replay_subscriptions(self) -> None:
+        for data_type, freq in tuple(self._fc_streams.items()):
+            ack = await self._send_command(
+                0x24, commands.encode_fc_stream(data_type, freq), _internal=True
+            )
+            commands.decode_fc_stream_ack(ack)
+        for gimbal_type, freq in tuple(self._gimbal_streams.items()):
+            ack = await self._send_command(
+                0x25, commands.encode_gimbal_stream(gimbal_type, freq), _internal=True
+            )
+            commands.decode_gimbal_stream_ack(ack)
+
+    async def _cleanup_session(self) -> None:
+        self.connection_event.clear()
+        for fut in tuple(self._pending.values()):
             if not fut.done():
-                fut.cancel()
+                fut.set_exception(ConnectionError("Connection lost"))
         self._pending.clear()
+        self._pending_meta.clear()
+        tasks = [task for task in (self._reader_task, self._heartbeat_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        failures = await asyncio.gather(*tasks, return_exceptions=True)
+        self._reader_task = self._heartbeat_task = None
+        try:
+            await self._transport.close()
+        except Exception as exc:
+            self._logger.error("transport_close_failed", error=str(exc))
+        finally:
+            self._parser.reset()
+        for failure in failures:
+            if isinstance(failure, Exception):
+                self._logger.warning("connection_task_failed", error=str(failure))
 
-        # Close transport
-        await self._transport.close()
-        self._logger.info("client_closed")
+    async def _supervise(self) -> None:
+        try:
+            while not self._closing:
+                tasks = [
+                    task for task in (self._reader_task, self._heartbeat_task) if task is not None
+                ]
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                await self._cleanup_session()
+                if not self._auto_reconnect or self._closing:
+                    return
+                if not await self._reconnect():
+                    return
+        finally:
+            await self._cleanup_session()
+
+    async def _reconnect(self) -> bool:
+        for attempt, delay in enumerate((0.5, 1.0, 2.0, 4.0, 8.0), 1):
+            await asyncio.sleep(delay)
+            try:
+                await self._open_session(replay=True)
+                return True
+            except Exception as exc:
+                await self._cleanup_session()
+                self._logger.warning("reconnect_failed", attempt=attempt, error=str(exc))
+        self._logger.error("reconnect_exhausted")
+        return False
 
     def _next_seq(self) -> int:
-        """Generate next sequence number with wrap at 0xFFFF.
-
-        Returns:
-            Next sequence number.
-        """
         current = self._seq
         self._seq = (self._seq + 1) & 0xFFFF
         return current
+
+    def _require_connected(self, internal: bool = False) -> None:
+        if (
+            self._closing
+            or not self._transport.is_connected
+            or (not internal and not self.connection_event.is_set())
+        ):
+            raise NotConnectedError("Client is not connected (or is reconnecting)")
 
     async def _send_command(
         self,
@@ -323,268 +401,114 @@ class SIYIClient:
         expect_response: bool = True,
         timeout: float | None = None,
         max_retries: int | None = None,
+        _internal: bool = False,
     ) -> bytes:
-        """Send a command and optionally wait for response.
-
-        This method handles:
-        - Frame construction with sequence number
-        - Per-CMD_ID locking to serialize concurrent requests
-        - Timeout management
-        - Automatic retry for idempotent reads
-
-        Args:
-            cmd_id: Command ID.
-            payload: Encoded payload bytes.
-            expect_response: Whether to wait for ACK.
-            timeout: Override default timeout (seconds).
-            max_retries: Override retry count for idempotent requests.
-
-        Returns:
-            ACK payload bytes (empty if expect_response=False).
-
-        Raises:
-            NotConnectedError: If not connected.
-            TimeoutError: If no response within timeout.
-        """
-        if not self._transport.is_connected:
-            raise NotConnectedError("Client not connected")
-
-        if timeout is None:
-            timeout = self._default_timeout
-
-        # Build frame
-        async with self._seq_lock:
-            seq = self._next_seq()
-
-        frame = Frame.build(cmd_id, payload, seq=seq, need_ack=expect_response)
-        frame_bytes = frame.to_bytes()
-
-        # Fire-and-forget commands
-        if not expect_response:
-            await self._transport.send(frame_bytes)
-            self._logger.debug("tx_fire_and_forget", cmd_id=f"0x{cmd_id:02X}", seq=seq)
-            return b""
-
-        # Get or create per-CMD_ID lock
-        if cmd_id not in self._cmd_locks:
-            self._cmd_locks[cmd_id] = asyncio.Lock()
-
-        # Serialize concurrent requests with same CMD_ID
-        async with self._cmd_locks[cmd_id]:
-            # Determine if eligible for retry
-            is_idempotent = cmd_id in _IDEMPOTENT_READS
+        self._require_connected(_internal)
+        timeout = self._default_timeout if timeout is None else timeout
+        lock = self._cmd_locks.setdefault(cmd_id, asyncio.Lock())
+        async with lock:
             retries = self._max_retries if max_retries is None else max_retries
-            max_attempts = retries + 1 if is_idempotent else 1
-
-            for attempt in range(max_attempts):
-                # Create future for this request
-                fut: asyncio.Future[Frame] = asyncio.Future()
+            attempts = retries + 1 if expect_response and cmd_id in _IDEMPOTENT_READS else 1
+            for attempt in range(attempts):
+                self._require_connected(_internal)
+                seq = self._next_seq()
+                frame = Frame.build(cmd_id, payload, seq=seq, need_ack=expect_response)
+                if not expect_response:
+                    await self._transport.send(frame.to_bytes())
+                    return b""
+                fut: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
                 self._pending[cmd_id] = fut
-
+                self._pending_meta[cmd_id] = (seq, payload)
+                retry = False
                 try:
-                    # Send frame
-                    await self._transport.send(frame_bytes)
-                    self._logger.debug(
-                        "tx_request",
-                        cmd_id=f"0x{cmd_id:02X}",
-                        seq=seq,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                    )
-
-                    # Wait for response
-                    ack_frame = await asyncio.wait_for(fut, timeout=timeout)
-                    self._logger.info(
-                        "rx_ack", cmd_id=f"0x{cmd_id:02X}", seq=seq, payload_len=len(ack_frame.data)
-                    )
-                    return ack_frame.data
-
+                    await self._transport.send(frame.to_bytes())
+                    ack = await asyncio.wait_for(fut, timeout)
+                    self._logger.debug("rx_ack", cmd_id=cmd_id, seq=seq, payload_len=len(ack.data))
+                    return ack.data
                 except asyncio.TimeoutError as exc:
-                    # Remove pending entry
-                    self._pending.pop(cmd_id, None)
-
-                    if attempt < max_attempts - 1:
-                        # Retry with backoff
-                        delay = self._retry_base_delay * (2**attempt)
-                        self._logger.warning(
-                            "timeout_retrying",
-                            cmd_id=f"0x{cmd_id:02X}",
-                            attempt=attempt + 1,
-                            delay_s=delay,
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        # Exhausted retries
-                        self._logger.error(
-                            "timeout_exhausted", cmd_id=f"0x{cmd_id:02X}", timeout_s=timeout
-                        )
+                    if attempt == attempts - 1:
+                        self._logger.warning("timeout_exhausted", cmd_id=cmd_id, timeout_s=timeout)
                         raise TimeoutError(cmd_id=cmd_id, timeout_s=timeout) from exc
-
-                except Exception:
-                    # Cleanup on any other error
-                    self._pending.pop(cmd_id, None)
-                    raise
-
-        # Should never reach here
+                    self._logger.warning("timeout_retrying", cmd_id=cmd_id, attempt=attempt + 1)
+                    retry = True
+                finally:
+                    if self._pending.get(cmd_id) is fut:
+                        self._pending.pop(cmd_id, None)
+                        self._pending_meta.pop(cmd_id, None)
+                    if not fut.done():
+                        fut.cancel()
+                    elif not fut.cancelled():
+                        fut.exception()  # Consume failures when cancellation races transport loss.
+                if retry:
+                    await asyncio.sleep(self._retry_base_delay * 2**attempt)
         return b""
 
     async def _reader(self) -> None:
-        """Background task to read and dispatch frames.
-
-        This coroutine runs for the lifetime of the connection, reading
-        bytes from the transport, parsing frames, and dispatching them
-        to either pending futures or stream callbacks.
-        """
-        try:
-            async for chunk in self._transport.stream():
-                try:
-                    frames = self._parser.feed(chunk)
-                except (CRCError, FramingError) as e:
-                    # Malformed datagram from camera — parser already resynced, keep going.
-                    self._logger.warning("parse_error_skipped", exc=type(e).__name__, msg=str(e))
-                    continue
-                for frame in frames:
-                    await self._dispatch_frame(frame)
-        except Exception as e:
-            self._logger.error("reader_exception", exc=type(e).__name__, msg=str(e))
-            if self._auto_reconnect:
-                await self._reconnect()
-            else:
-                raise
+        async for chunk in self._transport.stream():
+            parsed = self._parser.feed(chunk)
+            for error in parsed.errors:
+                self._logger.warning("parse_error_skipped", error=str(error))
+            for frame in parsed.frames:
+                await self._dispatch_frame(frame)
+        raise ConnectionError("Transport reader reached EOF")
 
     async def _dispatch_frame(self, frame: Frame) -> None:
-        """Dispatch a received frame to the appropriate handler.
-
-        Args:
-            frame: Parsed frame to dispatch.
-        """
-        cmd_id = frame.cmd_id
-
-        # Check if there's a pending request for this CMD_ID first
-        # (responses to explicit requests take priority over unsolicited pushes)
-        if cmd_id in self._pending:
-            fut = self._pending.pop(cmd_id)
-            if not fut.done():
+        fut = self._pending.get(frame.cmd_id)
+        meta = self._pending_meta.get(frame.cmd_id)
+        if fut is not None and not fut.done() and meta is not None:
+            seq, payload = meta
+            sequence_ok = self._response_matching == "command" or seq == frame.seq
+            # These responses echo the requested stream/file selector in byte zero.
+            selector_ok = frame.cmd_id not in (0x20, 0x21, 0x24, 0x25, 0x49, 0x4A) or bool(
+                payload and frame.data and payload[0] == frame.data[0]
+            )
+            if sequence_ok and selector_ok:
                 fut.set_result(frame)
-            return
-
-        # Check if this is an unsolicited stream push
-        if cmd_id in _STREAM_PUSH_CMDS:
+        if frame.cmd_id in _STREAM_PUSH_CMDS:
             await self._dispatch_stream(frame)
-            return
+        elif fut is None:
+            self._logger.warning("unexpected_frame", cmd_id=f"0x{frame.cmd_id:02X}")
 
-        # Unknown/unexpected frame
-        try:
-            raise UnknownCommandError(cmd_id=cmd_id)
-        except UnknownCommandError as e:
-            self._logger.warning("unexpected_frame", cmd_id=f"0x{cmd_id:02X}", error=str(e))
+    def _notify_subscribers(self, callbacks: list[Callable[[_T], None]], value: _T) -> None:
+        for callback in tuple(callbacks):
+            try:
+                callback(value)
+            except Exception as exc:
+                self._logger.error("stream_callback_failed", error=str(exc))
 
     async def _dispatch_stream(self, frame: Frame) -> None:
-        """Dispatch a stream push frame to subscribers.
-
-        Args:
-            frame: Stream push frame.
-        """
-        cmd_id = frame.cmd_id
-
         try:
-            if cmd_id == CMD_REQUEST_GIMBAL_ATTITUDE:
-                attitude = commands.decode_gimbal_attitude(frame.data)
-                for att_cb in self._attitude_callbacks:
-                    att_cb(attitude)
-
-            elif cmd_id == CMD_FUNCTION_FEEDBACK:
-                feedback = commands.decode_function_feedback(frame.data)
-                for fb_cb in self._function_feedback_callbacks:
-                    fb_cb(feedback)
-
-            elif cmd_id == CMD_REQUEST_LASER_DISTANCE:
-                laser = commands.decode_laser_distance(frame.data)
-                for laser_cb in self._laser_callbacks:
-                    laser_cb(laser)
-
-            elif cmd_id == CMD_AI_TRACK_STREAM:
-                ai_target = commands.decode_ai_tracking(frame.data)
-                for ai_cb in self._ai_tracking_callbacks:
-                    ai_cb(ai_target)
-
-            elif cmd_id == CMD_REQUEST_MAGNETIC_ENCODER:
-                # Log but no public API subscription for magnetic encoder
-                encoder = commands.decode_magnetic_encoder(frame.data)
-                self._logger.debug(
-                    "magnetic_encoder_push", yaw=encoder.yaw, pitch=encoder.pitch, roll=encoder.roll
+            if frame.cmd_id == CMD_REQUEST_GIMBAL_ATTITUDE:
+                self._notify_subscribers(
+                    self._attitude_callbacks, commands.decode_gimbal_attitude(frame.data)
                 )
-
-            elif cmd_id == CMD_REQUEST_MOTOR_VOLTAGE:
-                # Log but no public API subscription for motor voltage
-                voltage = commands.decode_motor_voltage(frame.data)
-                self._logger.debug(
-                    "motor_voltage_push", yaw=voltage.yaw, pitch=voltage.pitch, roll=voltage.roll
+            elif frame.cmd_id == CMD_FUNCTION_FEEDBACK:
+                self._notify_subscribers(
+                    self._function_feedback_callbacks, commands.decode_function_feedback(frame.data)
                 )
-
-        except Exception as e:
-            self._logger.error(
-                "stream_dispatch_error", cmd_id=f"0x{cmd_id:02X}", exc=type(e).__name__, msg=str(e)
-            )
+            elif frame.cmd_id == CMD_REQUEST_LASER_DISTANCE:
+                self._notify_subscribers(
+                    self._laser_callbacks, commands.decode_laser_distance(frame.data)
+                )
+            elif frame.cmd_id == CMD_AI_TRACK_STREAM:
+                self._notify_subscribers(
+                    self._ai_tracking_callbacks, commands.decode_ai_tracking(frame.data)
+                )
+            elif frame.cmd_id == CMD_REQUEST_MAGNETIC_ENCODER:
+                self._logger.debug(
+                    "magnetic_encoder_push", value=commands.decode_magnetic_encoder(frame.data)
+                )
+            elif frame.cmd_id == CMD_REQUEST_MOTOR_VOLTAGE:
+                self._logger.debug(
+                    "motor_voltage_push", value=commands.decode_motor_voltage(frame.data)
+                )
+        except Exception as exc:
+            self._logger.warning("stream_decode_failed", cmd_id=frame.cmd_id, error=str(exc))
 
     async def _heartbeat(self) -> None:
-        """Background task to send periodic heartbeat frames (TCP only).
-
-        This coroutine sends HEARTBEAT_FRAME every 1 second for TCP transports.
-        """
-        try:
-            while True:
-                await asyncio.sleep(1.0)
-                await self._transport.send(HEARTBEAT_FRAME)
-                self._logger.debug("tx_heartbeat")
-        except asyncio.CancelledError:
-            self._logger.debug("heartbeat_cancelled")
-            raise
-        except Exception as e:
-            self._logger.error("heartbeat_exception", exc=type(e).__name__, msg=str(e))
-            raise
-
-    async def _reconnect(self) -> None:
-        """Attempt to reconnect with exponential backoff.
-
-        This method is called when auto_reconnect=True and the transport fails.
-        It attempts up to 5 reconnections with delays [0.5, 1, 2, 4, 8] seconds.
-
-        Raises:
-            ConnectionError: If all reconnection attempts fail.
-        """
-        delays = [0.5, 1.0, 2.0, 4.0, 8.0]
-        for attempt, delay in enumerate(delays, start=1):
-            self._logger.warning(
-                "reconnect_attempt", attempt=attempt, max_attempts=len(delays), delay_s=delay
-            )
-            await asyncio.sleep(delay)
-
-            try:
-                await self._transport.connect()
-                self._logger.info("reconnect_success", attempt=attempt)
-
-                # Restart reader
-                self._reader_task = asyncio.create_task(self._reader())
-
-                # Replay stream subscriptions
-                for data_type, freq in self._active_streams.items():
-                    if isinstance(data_type, GimbalDataType):
-                        await self.request_gimbal_stream(data_type, freq)
-                    elif isinstance(data_type, FCDataType):
-                        await self.request_fc_stream(data_type, freq)
-
-                self.connection_event.set()
-                return
-
-            except Exception as e:
-                self._logger.warning(
-                    "reconnect_failed", attempt=attempt, exc=type(e).__name__, msg=str(e)
-                )
-
-        # Exhausted all attempts
-        self.connection_event.clear()
-        raise ConnectionError("Reconnection failed after maximum attempts")
+        while True:
+            await asyncio.sleep(1.0)
+            await self._transport.send(HEARTBEAT_FRAME)
 
     # =========================================================================
     # System Commands (0x00, 0x01, 0x02, 0x40, 0x30, 0x31, 0x80, 0x81, 0x82)
@@ -597,6 +521,7 @@ class SIYIClient:
             Heartbeat is sent automatically for TCP transports.
             This method is provided for manual control if needed.
         """
+        self._require_connected()
         await self._transport.send(HEARTBEAT_FRAME)
 
     async def get_firmware_version(self) -> FirmwareVersion:
@@ -833,7 +758,7 @@ class SIYIClient:
         """Send a gimbal velocity command without waiting for an ACK.
 
         Intended for high-rate control loops (e.g. visual servoing at
-        50–100 Hz) where ACK round-trip latency and per-CMD_ID serialisation
+        50-100 Hz) where ACK round-trip latency and per-CMD_ID serialisation
         would stall the sender. The standard `rotate()` is preferred for
         one-shot commands where you want confirmation.
 
@@ -859,9 +784,7 @@ class SIYIClient:
         payload = commands.encode_set_attitude(yaw_deg, pitch_deg)
         await self._send_command(0x0E, payload, expect_response=False)
 
-    async def set_single_axis_nowait(
-        self, axis: Literal["yaw", "pitch"], angle_deg: float
-    ) -> None:
+    async def set_single_axis_nowait(self, axis: Literal["yaw", "pitch"], angle_deg: float) -> None:
         """Send a single-axis position setpoint without waiting for an ACK.
 
         Args:
@@ -918,9 +841,9 @@ class SIYIClient:
 
         # Track active streams for reconnect
         if freq == DataStreamFreq.OFF:
-            self._active_streams.pop(data_type, None)
+            self._fc_streams.pop(data_type, None)
         else:
-            self._active_streams[data_type] = freq
+            self._fc_streams[data_type] = freq
 
     async def request_gimbal_stream(self, data_type: GimbalDataType, freq: DataStreamFreq) -> None:
         """Request gimbal data stream (subscribes to pushes).
@@ -935,9 +858,9 @@ class SIYIClient:
 
         # Track active streams for reconnect
         if freq == DataStreamFreq.OFF:
-            self._active_streams.pop(data_type, None)
+            self._gimbal_streams.pop(data_type, None)
         else:
-            self._active_streams[data_type] = freq
+            self._gimbal_streams[data_type] = freq
 
     async def get_magnetic_encoder(self) -> MagneticEncoderAngles:
         """Request magnetic encoder angles.
@@ -1619,7 +1542,7 @@ class SIYIClient:
         from siyi_sdk.stream.models import StreamBackend as _StreamBackend
         from siyi_sdk.stream.models import StreamConfig
 
-        gen = _CameraGeneration.NEW if generation is None else _CameraGeneration(generation)
+        gen = _CameraGeneration.OLD if generation is None else _CameraGeneration(generation)
         bk = _StreamBackend.AUTO if backend is None else _StreamBackend(backend)
 
         # Retrieve the host IP from the underlying transport when available.

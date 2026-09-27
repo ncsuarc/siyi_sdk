@@ -47,9 +47,9 @@ class TestAiortspBackendUrl:
     async def test_connect_sets_connected(self, config: StreamConfig) -> None:
         backend = AiortspBackend(config)
         await backend.connect()
-        assert backend._connected
+        assert backend._session_task is not None
         await backend.disconnect()
-        assert not backend._connected
+        assert backend._session_task is None
 
     async def test_frame_available_false_initially(self, config: StreamConfig) -> None:
         backend = AiortspBackend(config)

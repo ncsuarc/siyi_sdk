@@ -19,7 +19,7 @@ from siyi_sdk.stream.models import StreamConfig, StreamFrame
 
 
 class MockStreamBackend(AbstractStreamBackend):
-    """Yields a fixed list of frames then stops.
+    """Yields a fixed list of frames then waits for disconnection.
 
     Suitable for injecting into SIYIStream via monkeypatching _select_backend.
     """
@@ -30,12 +30,15 @@ class MockStreamBackend(AbstractStreamBackend):
         super().__init__(config)
         self._frames = frames
         self._connected = False
+        self._closed = asyncio.Event()
 
     async def connect(self) -> None:
         self._connected = True
+        self._closed.clear()
 
     async def disconnect(self) -> None:
         self._connected = False
+        self._closed.set()
 
     def frame_available(self) -> bool:
         return bool(self._frames)
@@ -47,6 +50,7 @@ class MockStreamBackend(AbstractStreamBackend):
         for frame in self._frames:
             await asyncio.sleep(0)
             yield frame
+        await self._closed.wait()
 
 
 @pytest.fixture

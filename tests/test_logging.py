@@ -110,28 +110,21 @@ class TestCommandDispatchLogging:
     """Test logging events during command dispatch."""
 
     @pytest.mark.asyncio
-    async def test_info_on_command_dispatched(
+    async def test_ack_is_not_logged_at_info(
         self,
         mock_transport: MockTransport,
         frame_firmware_version_ack: bytes,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Test INFO log emitted when command dispatched."""
+        """Routine commands and ACKs do not flood INFO logging at 100 Hz."""
         configure_logging(level="INFO")
 
-        client = SIYIClient(mock_transport, default_timeout=0.5)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
         await client.connect()
 
-        with capture_logs() as logs:
-            mock_transport.queue_response(frame_firmware_version_ack)
-            await client.get_firmware_version()
-
-        # Find command_dispatched log
-        dispatched_logs = [r for r in logs if r.get("event") == "command_dispatched"]
-        assert len(dispatched_logs) > 0
-
-        log = dispatched_logs[0]
-        assert log["log_level"] == "info"
-        assert "cmd_id" in log
+        mock_transport.queue_response(frame_firmware_version_ack)
+        await client.get_firmware_version()
+        assert "rx_ack" not in capsys.readouterr().err
 
         await client.close()
 
@@ -141,25 +134,19 @@ class TestCommandDispatchLogging:
         monkeypatch: pytest.MonkeyPatch,
         mock_transport: MockTransport,
         frame_firmware_version_ack: bytes,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Test hexdump in logs when SIYI_PROTOCOL_TRACE=1."""
         monkeypatch.setenv("SIYI_PROTOCOL_TRACE", "1")
         configure_logging()
 
-        client = SIYIClient(mock_transport, default_timeout=0.5)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
         await client.connect()
 
-        with capture_logs() as logs:
-            mock_transport.queue_response(frame_firmware_version_ack)
-            await client.get_firmware_version()
-
-        # Find TX (outgoing) frame logs
-        tx_logs = [r for r in logs if r.get("direction") == "tx"]
-        assert len(tx_logs) > 0
-
-        # At least one TX log should have payload_hex
-        hexdump_logs = [r for r in tx_logs if "payload_hex" in r]
-        assert len(hexdump_logs) > 0
+        mock_transport.queue_response(frame_firmware_version_ack)
+        await client.get_firmware_version()
+        output = capsys.readouterr().err
+        assert "frame_tx" in output and "data_hex=" in output
 
         await client.close()
 
@@ -169,21 +156,18 @@ class TestCommandDispatchLogging:
         monkeypatch: pytest.MonkeyPatch,
         mock_transport: MockTransport,
         frame_firmware_version_ack: bytes,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Test no hexdump in logs when trace mode disabled."""
         monkeypatch.delenv("SIYI_PROTOCOL_TRACE", raising=False)
         configure_logging(level="DEBUG", trace=False)
 
-        client = SIYIClient(mock_transport, default_timeout=0.5)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
         await client.connect()
 
-        with capture_logs() as logs:
-            mock_transport.queue_response(frame_firmware_version_ack)
-            await client.get_firmware_version()
-
-        # No log should have payload_hex
-        hexdump_logs = [r for r in logs if "payload_hex" in r]
-        assert len(hexdump_logs) == 0
+        mock_transport.queue_response(frame_firmware_version_ack)
+        await client.get_firmware_version()
+        assert "data_hex=" not in capsys.readouterr().err
 
         await client.close()
 
@@ -202,35 +186,27 @@ class TestErrorLogging:
 
         parser = FrameParser()
 
-        with capture_logs() as logs:
-            parser.feed(bytes(wire))
-
-        # Parser should emit ERROR log for CRC mismatch
-        error_logs = [r for r in logs if r.get("log_level") == "error"]
-        assert len(error_logs) > 0
-
-        # Check that CRC error is mentioned
-        crc_errors = [r for r in error_logs if "crc" in r.get("event", "").lower()]
-        assert len(crc_errors) > 0
+        result = parser.feed(bytes(wire))
+        assert result.errors and "crc" in type(result.errors[0]).__name__.lower()
 
     @pytest.mark.asyncio
     async def test_warning_on_timeout(
         self,
         mock_transport: MockTransport,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Test WARNING/ERROR log on command timeout."""
         configure_logging(level="WARNING")
 
-        client = SIYIClient(mock_transport, default_timeout=0.2)
+        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.2)
         await client.connect()
 
-        with capture_logs() as logs, contextlib.suppress(Exception):
+        with contextlib.suppress(Exception):
             # Don't queue response — will timeout
             await client.get_firmware_version()
 
         # Should have warning or error logs
-        warning_or_error_logs = [r for r in logs if r.get("log_level") in ("warning", "error")]
-        assert len(warning_or_error_logs) > 0
+        assert "timeout_exhausted" in capsys.readouterr().err
 
         await client.close()
 
@@ -242,38 +218,29 @@ class TestTransportLogging:
     async def test_transport_connect_log(
         self,
         mock_transport: MockTransport,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Test INFO log on transport connect."""
         configure_logging(level="INFO")
 
-        with capture_logs() as logs:
-            await mock_transport.connect()
-
-        connect_logs = [r for r in logs if "connect" in r.get("event", "")]
-        assert len(connect_logs) > 0
-
-        log = connect_logs[0]
-        assert log["transport"] == "mock"
+        await mock_transport.connect()
+        output = capsys.readouterr().err
+        assert "connected" in output and "transport=mock" in output
 
     @pytest.mark.asyncio
     async def test_transport_send_log(
         self,
         mock_transport: MockTransport,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Test DEBUG log on transport send."""
         configure_logging(level="DEBUG")
 
         await mock_transport.connect()
 
-        with capture_logs() as logs:
-            await mock_transport.send(b"\x01\x02\x03")
-
-        send_logs = [r for r in logs if r.get("event") == "frame_tx"]
-        assert len(send_logs) > 0
-
-        log = send_logs[0]
-        assert log["transport"] == "mock"
-        assert log["length"] == 3
+        await mock_transport.send(b"\x01\x02\x03")
+        output = capsys.readouterr().err
+        assert "frame_tx" in output and "transport=mock" in output and "length=3" in output
 
 
 class TestParserLogging:

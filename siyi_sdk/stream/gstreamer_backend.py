@@ -13,15 +13,13 @@ new-sample signal handler posts frames to the asyncio event loop.
 
 from __future__ import annotations
 
-import asyncio
 import os
-import threading
 import time
-from collections import deque
-from collections.abc import AsyncGenerator
 from typing import Final, Literal, cast
 
+import numpy as np
 import structlog
+from numpy.typing import NDArray
 
 # Jetson detection: /etc/nv_tegra_release exists only on L4T (Jetson) systems.
 _IS_JETSON: Final[bool] = os.path.exists("/etc/nv_tegra_release")
@@ -30,15 +28,16 @@ try:
     import gi
 
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gst
+    gi.require_version("GstVideo", "1.0")
+    from gi.repository import Gst, GstVideo
 
     Gst.init(None)
     _GST_AVAILABLE = True
 except Exception:  # gi not installed or version unavailable
     _GST_AVAILABLE = False
 
-from .base import AbstractStreamBackend
-from .models import StreamConfig, StreamFrame
+from ._threaded import ThreadedBackend  # noqa: E402
+from .models import StreamConfig, StreamFrame, StreamState  # noqa: E402
 
 _log: Final = structlog.get_logger(__name__)
 
@@ -80,7 +79,7 @@ _JETSON_PIPELINE = (
 )
 
 
-class GStreamerBackend(AbstractStreamBackend):
+class GStreamerBackend(ThreadedBackend):
     """GStreamer + appsink RTSP backend.
 
     Frames are extracted in the new-sample signal handler and dispatched to
@@ -96,7 +95,7 @@ class GStreamerBackend(AbstractStreamBackend):
         ImportError: If PyGObject / GStreamer is not installed.
     """
 
-    BACKEND_NAME: Final = "gstreamer"
+    BACKEND_NAME = "gstreamer"
 
     def __init__(
         self,
@@ -120,20 +119,10 @@ class GStreamerBackend(AbstractStreamBackend):
             )
         super().__init__(config)
         self._codec = codec
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._queue: asyncio.Queue[StreamFrame] | None = None
-        self._latest: deque[StreamFrame] = deque(maxlen=1)
         self._pipeline: Gst.Pipeline | None = None
-        self._glib_thread: threading.Thread | None = None
-        # Set only by disconnect(); means "the user asked us to stop". A dead
-        # pipeline must never set this, or frame_generator() would terminate
-        # and the stream could not be resurrected.
-        self._stop_event = threading.Event()
-        # Monotonic timestamp of the last decoded frame; 0.0 until the first
-        # frame arrives. Drives both stall detection and reconnect back-off.
-        self._last_frame_time: float = 0.0
-        self._reconnect_count: int = 0
-        self._last_restart: float = 0.0
+        self._last_frame_time = 0.0
+        self._healthy_since: float | None = None
+        self._reconnect_count = 0
 
     def _build_pipeline_str(self) -> str:
         """Build the GStreamer pipeline string from configuration.
@@ -170,7 +159,10 @@ class GStreamerBackend(AbstractStreamBackend):
         self._pipeline = Gst.parse_launch(pipeline_str)
         sink = self._pipeline.get_by_name("sink")
         sink.connect("new-sample", self._on_sample)
-        self._pipeline.set_state(Gst.State.PLAYING)
+        if sink is None:
+            raise ValueError("Pipeline must contain appsink named sink")
+        if self._pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            raise OSError("GStreamer could not start pipeline")
         # Treat start as "just saw a frame" so the stall detector gives the
         # pipeline a full _STALL_TIMEOUT to produce its first frame.
         self._last_frame_time = time.monotonic()
@@ -181,184 +173,57 @@ class GStreamerBackend(AbstractStreamBackend):
             self._pipeline.set_state(Gst.State.NULL)
             self._pipeline = None
 
-    async def connect(self) -> None:
-        """Build the GStreamer pipeline and start the supervisor thread."""
-        self._stop_event.clear()
-        self._loop = asyncio.get_event_loop()
-        self._queue = asyncio.Queue(maxsize=1)
-        self._reconnect_count = 0
-
-        self._start_pipeline()
-
-        # Supervise the pipeline in a plain thread instead of a GLib.MainLoop.
-        # A running GLib.MainLoop holds the GLib type-system lock, which blocks
-        # GTK3 initialisation in the main thread (e.g. cv2.imshow). Polling
-        # with timed_pop_filtered() achieves the same error/EOS detection
-        # without occupying the GLib lock.
-        self._glib_thread = threading.Thread(
-            target=self._supervise,
-            name="siyi-gst-bus",
-            daemon=True,
-        )
-        self._glib_thread.start()
-
-        _log.info("gstreamer_backend_connected", url=self._config.rtsp_url)
-
-    async def disconnect(self) -> None:
-        """Stop the pipeline and release resources."""
-        self._stop_event.set()
-        self._stop_pipeline()
-        if self._glib_thread is not None:
-            self._glib_thread.join(timeout=5.0)
-            self._glib_thread = None
-        _log.info("gstreamer_backend_disconnected")
-
-    @property
-    def seconds_since_last_frame(self) -> float:
-        """Seconds since the last decoded frame, or ``inf`` if none yet.
-
-        Returns:
-            Age of the newest frame in seconds.
-        """
-        if self._last_frame_time == 0.0:
-            return float("inf")
-        return time.monotonic() - self._last_frame_time
-
     @property
     def reconnect_count(self) -> int:
-        """Number of pipeline rebuilds performed since connect().
-
-        Returns:
-            Reconnect attempt count.
-        """
+        """Number of retries since the last healthy interval."""
         return self._reconnect_count
 
-    def frame_available(self) -> bool:
-        """Return True if a frame is buffered.
+    def _healthy_reset_due(self, now: float) -> bool:
+        return self._healthy_since is not None and now - self._healthy_since >= _HEALTHY_RESET_AFTER
 
-        Returns:
-            True when the latest deque contains a frame.
-        """
-        return bool(self._latest)
-
-    def read_frame_nowait(self) -> StreamFrame | None:
-        """Return the most recently decoded frame without blocking.
-
-        Returns:
-            Most recent StreamFrame, or None if none available.
-        """
-        return self._latest[-1] if self._latest else None
-
-    async def frame_generator(self) -> AsyncGenerator[StreamFrame, None]:
-        """Yield frames posted by the GStreamer appsink callback.
-
-        Yields:
-            StreamFrame objects in arrival order.
-        """
-        if self._queue is None:
-            return
-        while not self._stop_event.is_set():
-            try:
-                frame = await asyncio.wait_for(self._queue.get(), timeout=0.1)
-                yield frame
-            except asyncio.TimeoutError:
-                continue
-
-    def _supervise(self) -> None:
-        """Watch the pipeline and rebuild it whenever it dies.
-
-        Runs in a daemon thread. Uses timed_pop_filtered so no GLib.MainLoop
-        is needed, keeping the GLib type-system lock free for the main thread.
-
-        A pipeline dies in two distinguishable ways, and both are recoverable:
-
-        * It posts ERROR or EOS on the bus. rtspsrc does this when the RTSP
-          session is torn down by the camera or the transport fails.
-        * It silently stops producing frames. On a lossy link rtspsrc can sit
-          in PLAYING with RTP no longer arriving and never post anything, so
-          only ``_STALL_TIMEOUT`` catches it.
-
-        Neither sets ``_stop_event`` — that belongs to ``disconnect()`` alone.
-        """
+    def _worker(self) -> None:
+        self._reconnect_count = 0
         delay = self._config.reconnect_delay
-        max_attempts = self._config.max_reconnect_attempts
-
-        while not self._stop_event.is_set():
-            pipeline = self._pipeline
-
-            if pipeline is None:
-                # A previous restart attempt raised. Keep retrying rather than
-                # leaving the stream dead — that is the bug this loop exists
-                # to prevent.
-                reason = "pipeline not running"
-            else:
-                msg = pipeline.get_bus().timed_pop_filtered(
-                    Gst.MSECOND * 100,
-                    Gst.MessageType.ERROR | Gst.MessageType.EOS,
-                )
-                stalled = time.monotonic() - self._last_frame_time > _STALL_TIMEOUT
-
-                if msg is None and not stalled:
-                    # Healthy. Once we have been streaming a while, forget any
-                    # back-off accumulated by earlier outages.
-                    if (
-                        self._reconnect_count
-                        and time.monotonic() - self._last_restart > _HEALTHY_RESET_AFTER
-                    ):
-                        delay = self._config.reconnect_delay
-                        self._reconnect_count = 0
-                    continue
-
-                if msg is None:
-                    reason = f"no frames for {_STALL_TIMEOUT:.0f}s"
-                    _log.warning("gst_pipeline_stalled", timeout_s=_STALL_TIMEOUT)
-                elif msg.type == Gst.MessageType.ERROR:
-                    err, debug = msg.parse_error()
-                    reason = str(err)
-                    _log.error("gst_pipeline_error", error=reason, debug=debug)
-                else:
-                    reason = "end-of-stream"
-                    _log.warning("gst_pipeline_eos")
-
-                self._stop_pipeline()
-
-            if self._stop_event.is_set():
-                break
-
-            self._reconnect_count += 1
-            if max_attempts and self._reconnect_count > max_attempts:
-                _log.error(
-                    "gst_reconnect_giving_up",
-                    attempts=self._reconnect_count - 1,
-                    reason=reason,
-                )
-                self._stop_event.set()
-                break
-
-            _log.warning(
-                "gst_reconnecting",
-                attempt=self._reconnect_count,
-                delay_s=round(delay, 1),
-                reason=reason,
-            )
-
-            # Interruptible sleep so disconnect() stays responsive during back-off.
-            if self._stop_event.wait(timeout=delay):
-                break
-
-            try:
-                self._start_pipeline()
-                self._last_restart = time.monotonic()
-                _log.info("gst_reconnected", attempt=self._reconnect_count)
-            except Exception as exc:
-                _log.error(
-                    "gst_reconnect_failed",
-                    attempt=self._reconnect_count,
-                    exc=type(exc).__name__,
-                    msg=str(exc),
-                )
-
-            delay = min(delay * 2.0, _RECONNECT_DELAY_CAP)
+        try:
+            while not self._stop_event.is_set():
+                reason = "Pipeline failed"
+                self._healthy_since = None
+                try:
+                    self._start_pipeline()
+                    while not self._stop_event.is_set():
+                        assert self._pipeline is not None
+                        msg = self._pipeline.get_bus().timed_pop_filtered(
+                            Gst.MSECOND * 100, Gst.MessageType.ERROR | Gst.MessageType.EOS
+                        )
+                        now = time.monotonic()
+                        if msg is not None or now - self._last_frame_time >= _STALL_TIMEOUT:
+                            reason = (
+                                str(msg.parse_error()[0])
+                                if msg is not None and msg.type == Gst.MessageType.ERROR
+                                else "End of stream or five-second frame stall"
+                            )
+                            break
+                        if self._healthy_reset_due(now):
+                            delay = self._config.reconnect_delay
+                            self._reconnect_count = 0
+                except Exception as exc:
+                    reason = str(exc)
+                finally:
+                    self._stop_pipeline()
+                if self._stop_event.is_set():
+                    return
+                if (
+                    self._config.max_reconnect_attempts
+                    and self._reconnect_count >= self._config.max_reconnect_attempts
+                ):
+                    raise OSError(reason)
+                self.state = StreamState.RECONNECTING
+                if self._stop_event.wait(delay):
+                    return
+                self._reconnect_count += 1
+                delay = min(delay * 2, _RECONNECT_DELAY_CAP)
+        finally:
+            self._stop_pipeline()
 
     def _on_sample(self, sink: object) -> object:
         """GStreamer appsink new-sample signal handler.
@@ -372,8 +237,6 @@ class GStreamerBackend(AbstractStreamBackend):
         Returns:
             GLib flow return constant.
         """
-        import numpy as np  # deferred so module loads without numpy at import time
-
         # Cast sink from object to GStreamer appsink type (Gst is Any via ignore_missing_imports).
         gst_sink = cast("Gst.Element", sink)
         try:
@@ -390,13 +253,17 @@ class GStreamerBackend(AbstractStreamBackend):
                 return Gst.FlowReturn.OK
 
             try:
-                # Jetson hardware path emits BGRx (4ch). Strip alpha so all
-                # backends deliver a 3-channel BGR frame to user code.
-                channels = 4 if fmt == "BGRx" else 3
-                raw = np.frombuffer(map_info.data, dtype=np.uint8).reshape(
-                    height, width, channels
+                meta = GstVideo.buffer_get_video_meta(buf)
+                if meta is None:
+                    if hasattr(GstVideo.VideoInfo, "new_from_caps"):
+                        meta = GstVideo.VideoInfo.new_from_caps(caps)
+                    else:
+                        meta = GstVideo.VideoInfo()
+                        if not meta.from_caps(caps):
+                            raise ValueError("Could not parse video layout")
+                img = copy_bgr_pixels(
+                    map_info.data, width, height, fmt, meta.offset[0], meta.stride[0]
                 )
-                img = raw[:, :, :3].copy() if channels == 4 else raw.copy()
             finally:
                 buf.unmap(map_info)
 
@@ -407,7 +274,11 @@ class GStreamerBackend(AbstractStreamBackend):
                 height=height,
                 backend=self.BACKEND_NAME,
             )
-            self._latest.append(sf)
+            self.state = StreamState.RUNNING
+            if self._healthy_since is None:
+                self._healthy_since = sf.timestamp
+            if self._delivery:
+                self._delivery.publish(sf)
             # Feeds the supervisor's stall detector.
             self._last_frame_time = sf.timestamp
 
@@ -419,19 +290,31 @@ class GStreamerBackend(AbstractStreamBackend):
                 timestamp=sf.timestamp,
             )
 
-            loop = self._loop
-            queue = self._queue
-            if loop is not None and queue is not None:
-                def _put(q: asyncio.Queue[StreamFrame] = queue, f: StreamFrame = sf) -> None:
-                    try:
-                        q.put_nowait(f)
-                    except asyncio.QueueFull:
-                        pass
-
-                loop.call_soon_threadsafe(_put)
-
         except Exception as exc:
             _log.error("gst_sample_error", exc=type(exc).__name__, msg=str(exc))
 
         return Gst.FlowReturn.OK
 
+
+def copy_bgr_pixels(
+    data: bytes | bytearray | memoryview,
+    width: int,
+    height: int,
+    fmt: str,
+    offset: int,
+    stride: int,
+) -> NDArray[np.uint8]:
+    """Copy visible packed pixels using the mapped plane's actual layout."""
+    if fmt not in ("BGR", "BGRx"):
+        raise ValueError(f"Unsupported appsink format: {fmt}")
+    channels = 4 if fmt == "BGRx" else 3
+    if width <= 0 or height <= 0 or abs(stride) < width * channels:
+        raise ValueError("Invalid video dimensions or row stride")
+    raw: NDArray[np.uint8] = np.ndarray(
+        (height, width, channels),
+        dtype=np.uint8,
+        buffer=data,
+        offset=offset,
+        strides=(stride, channels, 1),
+    )
+    return raw[:, :, :3].copy()

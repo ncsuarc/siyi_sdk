@@ -19,6 +19,7 @@ from .models import (
     StreamBackend,
     StreamConfig,
     StreamFrame,
+    StreamState,
     build_rtsp_url,
 )
 from .stream import SIYIStream
@@ -30,5 +31,6 @@ __all__ = [
     "StreamBackend",
     "StreamConfig",
     "StreamFrame",
+    "StreamState",
     "build_rtsp_url",
 ]

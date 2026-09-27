@@ -122,7 +122,7 @@ async def connected_client(mock_transport: MockTransport) -> AsyncIterator[SIYIC
         Connected SIYIClient instance.
 
     """
-    client = SIYIClient(mock_transport, default_timeout=0.5)
+    client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
     await client.connect()
     yield client
     await client.close()
@@ -152,7 +152,7 @@ def frame_firmware_version_ack() -> bytes:
 @pytest.fixture
 def frame_hardware_id_ack() -> bytes:
     """Hardware ID ACK frame (0x02) — ZR10 example."""
-    payload = b"6b\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A"
+    payload = b"6b\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a"
     return Frame(ctrl=CTRL_ACK_PACK, seq=2, cmd_id=CMD_REQUEST_HARDWARE_ID, data=payload).to_bytes()
 
 
@@ -487,9 +487,7 @@ def frame_set_env_correction_switch_ack() -> bytes:
 @pytest.fixture
 def frame_system_time_ack() -> bytes:
     """System time ACK frame (0x40) — 2024-01-15 10:30:45."""
-    payload = struct.pack(
-        "<HBBBBBB", 2024, 1, 15, 10, 30, 45, 1
-    )  # year, month, day, hour, min, sec, valid
+    payload = struct.pack("<QI", 1705314645, 0)
     return Frame(
         ctrl=CTRL_ACK_PACK, seq=41, cmd_id=CMD_REQUEST_SYSTEM_TIME, data=payload
     ).to_bytes()
@@ -547,7 +545,7 @@ def frame_set_mavlink_osd_flag_ack() -> bytes:
 def frame_ai_track_stream_push() -> bytes:
     """AI track stream push frame (0x50)."""
     # target_type, x, y, w, h, reserved
-    payload = struct.pack("<HHHHHH", 1, 640, 360, 200, 150, 0)
+    payload = struct.pack("<HHHHH", 1, 640, 360, 200, 150)
     return Frame(ctrl=CTRL_NEED_ACK, seq=48, cmd_id=CMD_AI_TRACK_STREAM, data=payload).to_bytes()
 
 
@@ -597,7 +595,7 @@ def frame_soft_reboot_ack() -> bytes:
 @pytest.fixture
 def frame_get_ip_ack() -> bytes:
     """Get IP ACK frame (0x81) — 192.168.144.25."""
-    payload = bytes([192, 168, 144, 25])
+    payload = struct.pack("<III", 0xC0A89019, 0xFFFFFF00, 0xC0A89001)
     return Frame(ctrl=CTRL_ACK_PACK, seq=54, cmd_id=CMD_GET_IP, data=payload).to_bytes()
 
 

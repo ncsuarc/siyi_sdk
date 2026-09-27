@@ -36,7 +36,7 @@ class TestParserFuzz:
         """
         parser = FrameParser()
         try:
-            result = parser.feed(data)
+            result = parser.feed(data).frames
             # Result should be a list
             assert isinstance(result, list)
             # All items should be Frame instances
@@ -79,7 +79,7 @@ class TestParserFuzz:
 
         # Feed all data, catching only documented exceptions
         with contextlib.suppress(CRCError, FramingError):
-            frames.extend(parser.feed(data))
+            frames.extend(parser.feed(data).frames)
 
         # We should have extracted at least one valid frame
         assert len(frames) >= 1
@@ -110,12 +110,12 @@ class TestParserFuzz:
             chunk = data[idx : idx + size]
             idx += size
             with contextlib.suppress(CRCError, FramingError):
-                frames2.extend(parser2.feed(chunk))
+                frames2.extend(parser2.feed(chunk).frames)
 
         # Remaining data
         if idx < len(data):
             with contextlib.suppress(CRCError, FramingError):
-                frames2.extend(parser2.feed(data[idx:]))
+                frames2.extend(parser2.feed(data[idx:]).frames)
 
         # Both approaches should yield same number of frames with same content
         # (Note: exact comparison might differ due to exception timing, so we check basics)
@@ -144,7 +144,7 @@ class TestParserFuzz:
         parser = FrameParser()
         parsed: list[Frame] = []
         with contextlib.suppress(CRCError, FramingError):
-            parsed = parser.feed(wire)
+            parsed = parser.feed(wire).frames
 
         # Should have parsed all frames
         assert len(parsed) == frames_count
@@ -155,7 +155,7 @@ class TestParserFuzz:
         """Parser returning empty list is a valid result."""
         parser = FrameParser()
         try:
-            result = parser.feed(data)
+            result = parser.feed(data).frames
             # Empty list is fine - data might not contain valid frames
             assert isinstance(result, list)
         except (CRCError, FramingError):
@@ -196,7 +196,7 @@ class TestParserReset:
         parser.reset()
 
         # Feed valid frame
-        frames = parser.feed(wire)
+        frames = parser.feed(wire).frames
 
         # Should get exactly one frame
         assert len(frames) == 1
@@ -213,7 +213,7 @@ class TestParserSpecialPatterns:
         parser = FrameParser()
         data = b"\x55" * count
         try:
-            result = parser.feed(data)
+            result = parser.feed(data).frames
             assert isinstance(result, list)
         except (CRCError, FramingError):
             pass
@@ -225,7 +225,7 @@ class TestParserSpecialPatterns:
         parser = FrameParser()
         data = b"\x55\x66" * count
         try:
-            result = parser.feed(data)
+            result = parser.feed(data).frames
             assert isinstance(result, list)
         except (CRCError, FramingError):
             pass
@@ -254,7 +254,7 @@ class TestParserSpecialPatterns:
         data = (b"\x55" * repeats) + wire
 
         parser = FrameParser()
-        frames = parser.feed(data)
+        frames = parser.feed(data).frames
 
         # Should still extract the valid frame
         assert len(frames) == 1

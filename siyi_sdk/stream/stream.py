@@ -23,7 +23,7 @@ from typing import Final
 import structlog
 
 from .base import AbstractStreamBackend
-from .models import StreamBackend, StreamConfig, StreamFrame
+from .models import StreamBackend, StreamConfig, StreamFrame, StreamState
 
 _log: Final = structlog.get_logger(__name__)
 
@@ -66,7 +66,10 @@ class SIYIStream:
         self._last_frame: StreamFrame | None = None
         # Rolling window of frame timestamps for FPS calculation.
         self._frame_times: deque[float] = deque()
-        self._running = False
+        self._state = StreamState.STOPPED
+        self.last_error: Exception | None = None
+        self._operations = asyncio.Lock()
+        self._first_frame: asyncio.Future[None] | None = None
 
     def _select_backend(self) -> AbstractStreamBackend:
         """Select and instantiate the appropriate streaming backend.
@@ -132,37 +135,91 @@ class SIYIStream:
         )
 
     async def start(self) -> None:
-        """Begin streaming. Idempotent — safe to call if already running.
+        """Start only after a decoded frame, falling through AUTO candidates."""
+        async with self._operations:
+            if self.is_running:
+                return
+            if self._backend is not None:
+                await self._backend.disconnect()
+                self._backend = None
+            self._state = StreamState.STARTING
+            self.last_error = None
+            self._frame_times.clear()
+            self._last_frame = None
+            choices = (
+                (StreamBackend.GSTREAMER, StreamBackend.AIORTSP, StreamBackend.OPENCV)
+                if self._config.backend is StreamBackend.AUTO
+                else (self._config.backend,)
+            )
+            configured = self._config.backend
+            try:
+                for choice in choices:
+                    try:
+                        self._config.backend = choice
+                        self._backend = self._select_backend()
+                        self._first_frame = asyncio.get_running_loop().create_future()
+                        await self._backend.connect()
+                        self._task = asyncio.create_task(
+                            self._frame_loop(), name="siyi-stream-loop"
+                        )
+                        await asyncio.wait_for(
+                            asyncio.shield(self._first_frame), self._config.startup_timeout
+                        )
+                        return
+                    except Exception as exc:
+                        self.last_error = exc
+                        await self._cleanup()
+                        if configured is not StreamBackend.AUTO:
+                            raise
+                        _log.warning("backend_start_failed", backend=choice.value, error=str(exc))
+                raise RuntimeError("No backend produced a decoded frame") from self.last_error
+            except BaseException as exc:
+                if isinstance(exc, Exception):
+                    self.last_error = exc
+                self._state = StreamState.FAILED
+                await self._cleanup()
+                raise
+            finally:
+                self._config.backend = configured
 
-        Selects a backend, connects it, and starts the internal frame loop task.
-        """
-        if self._running:
-            return
-
-        self._backend = self._select_backend()
-        await self._backend.connect()
-        self._running = True
-        self._task = asyncio.create_task(self._frame_loop(), name="siyi-stream-loop")
-        _log.info("stream_started", url=self._config.rtsp_url)
-
-    async def stop(self) -> None:
-        """Stop streaming and release resources. Idempotent."""
-        if not self._running:
-            return
-
-        self._running = False
-
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+    async def _cleanup(self) -> None:
+        task = self._task
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             self._task = None
-
+        if self._first_frame is not None:
+            if not self._first_frame.done():
+                self._first_frame.cancel()
+            elif not self._first_frame.cancelled():
+                self._first_frame.exception()
         if self._backend is not None:
+            # Retain ownership if shutdown fails; a live native worker forbids restart.
             await self._backend.disconnect()
             self._backend = None
 
-        _log.info("stream_stopped")
+    async def stop(self) -> None:
+        """Stop and release resources; report workers that could not terminate."""
+        async with self._operations:
+            self._state = StreamState.STOPPING
+            try:
+                await self._cleanup()
+            except Exception as exc:
+                self.last_error = exc
+                self._state = StreamState.FAILED
+                raise
+            self._state = StreamState.STOPPED
+
+    @property
+    def state(self) -> StreamState:
+        """Current stream lifecycle, including backend reconnects."""
+        if (
+            self._state is StreamState.RUNNING
+            and self._backend is not None
+            and self._backend.state is StreamState.RECONNECTING
+        ):
+            return StreamState.RECONNECTING
+        return self._state
 
     def on_frame(self, callback: FrameCallback) -> Callable[[], None]:
         """Register a frame callback. Returns an unsubscribe callable.
@@ -208,7 +265,11 @@ class SIYIStream:
         Returns:
             bool: True if start() has been called and stop() has not completed.
         """
-        return self._running
+        return (
+            self._task is not None
+            and not self._task.done()
+            and self.state in (StreamState.RUNNING, StreamState.RECONNECTING)
+        )
 
     @property
     def fps(self) -> float:
@@ -232,19 +293,45 @@ class SIYIStream:
         """
         return self._last_frame
 
+    def _record_frame(self, frame: StreamFrame) -> None:
+        self._last_frame = frame
+        now = time.monotonic()
+        self._frame_times.append(now)
+        while self._frame_times and now - self._frame_times[0] > 1.0:
+            self._frame_times.popleft()
+
     async def _frame_loop(self) -> None:
-        """Internal asyncio task that drives the backend frame generator."""
-        if self._backend is None:
+        backend = self._backend
+        if backend is None:
             return
+        cancelled = False
         try:
-            async for frame in self._backend.frame_generator():
-                self._last_frame = frame
-                self._frame_times.append(time.monotonic())
+            async for frame in backend.frame_generator():
+                self._record_frame(frame)
+                self._state = StreamState.RUNNING
+                if self._first_frame is not None and not self._first_frame.done():
+                    self._first_frame.set_result(None)
                 await self._dispatch(frame)
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception as exc:
-            _log.error("frame_loop_error", exc=type(exc).__name__, msg=str(exc))
+            self.last_error = exc
+            self._state = StreamState.FAILED
+            _log.error("frame_loop_error", error=str(exc))
+        finally:
+            if self._first_frame is not None and not self._first_frame.done():
+                self._first_frame.set_exception(
+                    self.last_error or RuntimeError("Producer exited before decoding a frame")
+                )
+            if self._state is StreamState.RUNNING:
+                self._state = StreamState.STOPPED
+            if not cancelled:
+                try:
+                    await backend.disconnect()
+                except Exception as exc:
+                    self.last_error = exc
+                    self._state = StreamState.FAILED
 
     async def _dispatch(self, frame: StreamFrame) -> None:
         """Call all registered callbacks with the given frame.
@@ -257,10 +344,9 @@ class SIYIStream:
         """
         for cb in list(self._callbacks):
             try:
-                if inspect.iscoroutinefunction(cb):
-                    await asyncio.ensure_future(cb(frame))
-                else:
-                    cb(frame)
+                result = cb(frame)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as exc:
                 _log.error(
                     "callback_exception",

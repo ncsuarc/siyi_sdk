@@ -45,7 +45,7 @@ class TestOpenCVBackendInit:
 class TestOpenCVBackendConnect:
     async def test_thread_started(self, config: StreamConfig) -> None:
         backend = OpenCVBackend(config)
-        with patch.object(backend, "_capture_loop"):
+        with patch.object(backend, "_worker"):
             await backend.connect()
             assert backend._thread is not None
             assert backend._thread.daemon
@@ -53,9 +53,9 @@ class TestOpenCVBackendConnect:
 
     async def test_queue_created(self, config: StreamConfig) -> None:
         backend = OpenCVBackend(config)
-        with patch.object(backend, "_capture_loop"):
+        with patch.object(backend, "_worker"):
             await backend.connect()
-            assert backend._queue is not None
+            assert backend._delivery is not None
             await backend.disconnect()
 
 
@@ -80,7 +80,7 @@ class TestOpenCVBackendFrameCapture:
             # Wait briefly for thread to process
             await asyncio.sleep(0.2)
 
-        received_frames = list(backend._latest)
+        received_frames = [backend.read_frame_nowait()]
         await backend.disconnect()
 
         assert len(received_frames) >= 1
@@ -114,7 +114,7 @@ class TestOpenCVBackendRtspUrl:
         url = build_rtsp_url(host="192.168.144.25", stream="main")
         cfg = StreamConfig(rtsp_url=url)
         backend = OpenCVBackend(cfg)
-        assert backend._config.rtsp_url == "rtsp://192.168.144.25:8554/video1"
+        assert backend._config.rtsp_url == "rtsp://192.168.144.25:8554/main.264"
 
 
 class TestOpenCVBackendDisconnect:
@@ -128,7 +128,7 @@ class TestOpenCVBackendDisconnect:
             ready.set()
             backend._stop_event.wait()
 
-        with patch.object(backend, "_capture_loop", side_effect=blocking_loop):
+        with patch.object(backend, "_worker", side_effect=blocking_loop):
             await backend.connect()
             ready.wait(timeout=1.0)  # ensure thread is running
             thread = backend._thread
