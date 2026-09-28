@@ -104,7 +104,9 @@ class CameraState:
             
             logger.info(f"Initializing clients for IP: {ip}")
             transport = UDPTransport(ip)
-            self.client = SIYIClient(transport)
+            # A8 Mini replies observed over UDP use their own sequence counter.
+            # Match ACKs by command ID; the client serializes each command ID.
+            self.client = SIYIClient(transport, max_retries=2, response_matching="command")
             self.client.on_attitude(self._on_attitude)
             self.client.on_function_feedback(self._on_feedback)
             # Status uses its own command ID lock, with one attempt per query;

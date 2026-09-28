@@ -150,7 +150,7 @@ class SIYIClient:
         transport: AbstractTransport,
         *,
         default_timeout: float = 2.0,
-        max_retries: int = 2,
+        max_retries: int = 10,
         retry_base_delay: float = 0.1,
         auto_reconnect: bool = False,
         response_matching: Literal["sequence", "command"] = "sequence",

@@ -28,7 +28,7 @@ async def connect_udp(
     timeout: float = 2.0,
     max_retries: int = 2,
     auto_reconnect: bool = False,
-    response_matching: Literal["sequence", "command"] = "sequence",
+    response_matching: Literal["sequence", "command"] = "command",
 ) -> SIYIClient:
     """Create and connect a SIYI client using UDP transport.
 
@@ -38,7 +38,8 @@ async def connect_udp(
         timeout: Default command timeout in seconds.
         max_retries: Maximum retry attempts for idempotent commands (0 = no retries).
         auto_reconnect: Enable automatic reconnection on failure.
-        response_matching: "sequence" (default) or "command" compatibility matching.
+        response_matching: Match A8 Mini replies by command ID by default; use
+            "sequence" when firmware echoes request sequence numbers.
 
     Returns:
         Connected SIYIClient instance.
@@ -68,8 +69,8 @@ async def connect_tcp(
     port: int = DEFAULT_TCP_PORT,
     *,
     timeout: float = 2.0,
-    max_retries: int = 2,
-    auto_reconnect: bool = False,
+    max_retries: int = 10,
+    auto_reconnect: bool = True,
     response_matching: Literal["sequence", "command"] = "sequence",
 ) -> SIYIClient:
     """Create and connect a SIYI client using TCP transport.
@@ -112,8 +113,8 @@ async def connect_serial(
     baud: int = DEFAULT_BAUD,
     *,
     timeout: float = 2.0,
-    max_retries: int = 2,
-    auto_reconnect: bool = False,
+    max_retries: int = 10,
+    auto_reconnect: bool = True,
     response_matching: Literal["sequence", "command"] = "sequence",
 ) -> SIYIClient:
     """Create and connect a SIYI client using Serial transport.

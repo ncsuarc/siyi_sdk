@@ -26,4 +26,6 @@ asyncio.run(main())
 
 `connect_tcp()` and `connect_serial()` support the A8 Mini's other control inputs. TCP heartbeat is automatic. A8 Mini zoom is digital; optical focus commands are not part of this SDK.
 
+Some A8 Mini firmware replies use a sequence counter independent of requests. `connect_udp()` therefore matches replies by command ID by default. Pass `response_matching="sequence"` if your firmware echoes request sequence numbers and you need strict matching. The web dashboard uses command ID matching as well.
+
 See [examples](../examples/README.md), [streaming](streaming.md), and [web UI](WEB_UI.md).
