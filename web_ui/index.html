@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SIYI SDK Web UI</title>
+    <title>SIYI A8 Mini</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -26,6 +26,13 @@
                 <input type="checkbox" id="config-live-view-toggle" checked style="width: auto; cursor: pointer;">
                 <label for="config-live-view-toggle" style="font-size: 0.8rem; cursor: pointer;">Live View</label>
             </div>
+            <label for="stream-backend-select">Video backend</label>
+            <select id="stream-backend-select" aria-label="Video backend">
+                <option value="auto">Auto</option>
+                <option value="opencv">OpenCV</option>
+                <option value="gstreamer">GStreamer</option>
+                <option value="aiortsp">aiortsp</option>
+            </select>
             <button class="btn" id="theme-toggle-btn" title="Toggle Theme" style="padding: 8px 12px;">
                 <i class="fas fa-moon"></i>
             </button>
@@ -40,7 +47,6 @@
             <section class="camera-state-strip" aria-label="Camera reported status">
                 <div><span class="state-label">Gimbal mode</span><strong id="gimbal-mode-status">Unknown</strong></div>
                 <div><span class="state-label">Recording</span><strong id="record-state-status">Unknown</strong></div>
-                <div><span class="state-label">HDR</span><strong id="hdr-status">Unknown</strong></div>
                 <div><span class="state-label">Status source</span><strong id="state-freshness">Waiting for camera</strong></div>
             </section>
             <div class="video-container">
@@ -138,8 +144,6 @@
                     <button class="btn" id="record-btn"><i class="fas fa-video"></i> Record</button>
                     <button class="btn" id="zoom-in-btn"><i class="fas fa-search-plus"></i> Zoom +</button>
                     <button class="btn" id="zoom-out-btn"><i class="fas fa-search-minus"></i> Zoom -</button>
-                    <button class="btn" id="focus-near-btn"><i class="fas fa-eye"></i> Focus Near</button>
-                    <button class="btn" id="focus-far-btn"><i class="fas fa-eye-slash"></i> Focus Far</button>
                 </div>
             </div>
 
@@ -153,6 +157,24 @@
                     <p>Bitrate: <span id="info-bitrate">---</span></p>
                     <p>FPS: <span id="info-fps">---</span></p>
                 </div>
+            </div>
+            <div class="control-card command-explorer">
+                <h3>A8 Mini Command Explorer</h3>
+                <p class="control-hint">Run supported SDK commands and inspect camera replies.</p>
+                <label for="explorer-group">Group</label>
+                <select id="explorer-group"></select>
+                <label for="explorer-command">Command</label>
+                <select id="explorer-command"></select>
+                <p id="explorer-description" class="control-hint"></p>
+                <form id="explorer-form">
+                    <div id="explorer-fields"></div>
+                    <button class="btn btn-primary" type="submit">Send command</button>
+                </form>
+                <pre id="explorer-result" role="status" aria-live="polite">Select a command.</pre>
+                <h4>Live gimbal telemetry</h4>
+                <p id="explorer-telemetry" class="control-hint">Waiting for attitude data.</p>
+                <h4>Recent camera feedback</h4>
+                <ul id="explorer-feedback"></ul>
             </div>
         </aside>
     </main>
@@ -202,5 +224,6 @@
     <div id="command-status" class="command-status" role="status" aria-live="polite" hidden></div>
 
     <script src="/static/app.js"></script>
+    <script src="/static/command_explorer.js"></script>
 </body>
 </html>

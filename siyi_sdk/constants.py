@@ -11,7 +11,6 @@ This module contains all protocol-level constants including:
 - Command IDs from the SIYI SDK protocol specification
 - CRC-16/XMODEM polynomial and lookup table
 - Default network endpoints and hardware IDs
-- Laser ranging constants
 """
 
 from __future__ import annotations
@@ -335,23 +334,13 @@ HEARTBEAT_FRAME: Final[bytes] = bytes.fromhex("556601010000000000598B")
 CAMERA_BOOT_SECONDS: Final[int] = 30
 
 # =============================================================================
-# Laser Ranging Constants
-# =============================================================================
-
-LASER_MIN_M: Final[int] = 5
-LASER_MAX_M: Final[int] = 1200
-LASER_MIN_RAW_DM: Final[int] = 50  # Minimum raw value in decimeters
-
-# =============================================================================
 # Command IDs (from SIYI SDK Protocol Appendix B)
 # =============================================================================
 
 CMD_TCP_HEARTBEAT: Final[int] = 0x00
 CMD_REQUEST_FIRMWARE_VERSION: Final[int] = 0x01
 CMD_REQUEST_HARDWARE_ID: Final[int] = 0x02
-CMD_AUTO_FOCUS: Final[int] = 0x04
 CMD_MANUAL_ZOOM_AUTO_FOCUS: Final[int] = 0x05
-CMD_MANUAL_FOCUS: Final[int] = 0x06
 CMD_GIMBAL_ROTATION: Final[int] = 0x07
 CMD_ONE_KEY_CENTERING: Final[int] = 0x08
 CMD_REQUEST_CAMERA_SYSTEM_INFO: Final[int] = 0x0A
@@ -360,22 +349,12 @@ CMD_CAPTURE_PHOTO_RECORD_VIDEO: Final[int] = 0x0C
 CMD_REQUEST_GIMBAL_ATTITUDE: Final[int] = 0x0D
 CMD_SET_GIMBAL_ATTITUDE: Final[int] = 0x0E
 CMD_ABSOLUTE_ZOOM_AUTO_FOCUS: Final[int] = 0x0F
-CMD_REQUEST_VIDEO_STITCHING_MODE: Final[int] = 0x10
-CMD_SET_VIDEO_STITCHING_MODE: Final[int] = 0x11
-CMD_GET_TEMP_AT_POINT: Final[int] = 0x12
-CMD_LOCAL_TEMP_MEASUREMENT: Final[int] = 0x13
-CMD_GLOBAL_TEMP_MEASUREMENT: Final[int] = 0x14
-CMD_REQUEST_LASER_DISTANCE: Final[int] = 0x15
 CMD_REQUEST_ZOOM_RANGE: Final[int] = 0x16
-CMD_REQUEST_LASER_LATLON: Final[int] = 0x17
 CMD_REQUEST_ZOOM_MAGNIFICATION: Final[int] = 0x18
 CMD_REQUEST_GIMBAL_MODE: Final[int] = 0x19
-CMD_REQUEST_PSEUDO_COLOR: Final[int] = 0x1A
-CMD_SET_PSEUDO_COLOR: Final[int] = 0x1B
 CMD_REQUEST_ENCODING_PARAMS: Final[int] = 0x20
 CMD_SET_ENCODING_PARAMS: Final[int] = 0x21
 CMD_SEND_AIRCRAFT_ATTITUDE: Final[int] = 0x22
-CMD_SEND_RC_CHANNELS: Final[int] = 0x23
 CMD_REQUEST_FC_DATA_STREAM: Final[int] = 0x24
 CMD_REQUEST_GIMBAL_DATA_STREAM: Final[int] = 0x25
 CMD_REQUEST_MAGNETIC_ENCODER: Final[int] = 0x26
@@ -385,35 +364,14 @@ CMD_SET_WEAK_THRESHOLD: Final[int] = 0x29
 CMD_REQUEST_MOTOR_VOLTAGE: Final[int] = 0x2A
 CMD_SET_UTC_TIME: Final[int] = 0x30
 CMD_REQUEST_GIMBAL_SYSTEM_INFO: Final[int] = 0x31
-CMD_SET_LASER_RANGING_STATE: Final[int] = 0x32
-CMD_REQUEST_THERMAL_OUTPUT_MODE: Final[int] = 0x33
-CMD_SET_THERMAL_OUTPUT_MODE: Final[int] = 0x34
-CMD_GET_SINGLE_TEMP_FRAME: Final[int] = 0x35
-CMD_REQUEST_THERMAL_GAIN: Final[int] = 0x37
-CMD_SET_THERMAL_GAIN: Final[int] = 0x38
-CMD_REQUEST_ENV_CORRECTION_PARAMS: Final[int] = 0x39
-CMD_SET_ENV_CORRECTION_PARAMS: Final[int] = 0x3A
-CMD_REQUEST_ENV_CORRECTION_SWITCH: Final[int] = 0x3B
-CMD_SET_ENV_CORRECTION_SWITCH: Final[int] = 0x3C
 CMD_SEND_RAW_GPS: Final[int] = 0x3E
 CMD_REQUEST_SYSTEM_TIME: Final[int] = 0x40
 CMD_SINGLE_AXIS_ATTITUDE: Final[int] = 0x41
-CMD_GET_IR_THRESH_MAP_STA: Final[int] = 0x42
-CMD_SET_IR_THRESH_MAP_STA: Final[int] = 0x43
-CMD_GET_IR_THRESH_PARAM: Final[int] = 0x44
-CMD_SET_IR_THRESH_PARAM: Final[int] = 0x45
-CMD_GET_IR_THRESH_PRECISION: Final[int] = 0x46
-CMD_SET_IR_THRESH_PRECISION: Final[int] = 0x47
 CMD_SD_FORMAT: Final[int] = 0x48
 CMD_GET_PIC_NAME_TYPE: Final[int] = 0x49
 CMD_SET_PIC_NAME_TYPE: Final[int] = 0x4A
 CMD_GET_MAVLINK_OSD_FLAG: Final[int] = 0x4B
 CMD_SET_MAVLINK_OSD_FLAG: Final[int] = 0x4C
-CMD_GET_AI_MODE_STA: Final[int] = 0x4D
-CMD_GET_AI_TRACK_STREAM_STA: Final[int] = 0x4E
-CMD_MANUAL_THERMAL_SHUTTER: Final[int] = 0x4F
-CMD_AI_TRACK_STREAM: Final[int] = 0x50
-CMD_SET_AI_TRACK_STREAM_STA: Final[int] = 0x51
 CMD_REQUEST_WEAK_CONTROL_MODE: Final[int] = 0x70
 CMD_SET_WEAK_CONTROL_MODE: Final[int] = 0x71
 CMD_SOFT_REBOOT: Final[int] = 0x80
@@ -424,11 +382,7 @@ CMD_SET_IP: Final[int] = 0x82
 # Hardware ID Product Codes (first byte of hardware ID)
 # =============================================================================
 
-HW_ID_ZR10: Final[int] = 0x6B
 HW_ID_A8_MINI: Final[int] = 0x73
-HW_ID_A2_MINI: Final[int] = 0x75
-HW_ID_ZR30: Final[int] = 0x78
-HW_ID_QUAD_SPECTRUM: Final[int] = 0x7A
 
 # =============================================================================
 # A8 mini mechanical limits (degrees)

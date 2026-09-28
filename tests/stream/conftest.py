@@ -68,4 +68,4 @@ def sample_frame() -> StreamFrame:
 @pytest.fixture
 def stream_config() -> StreamConfig:
     """Default StreamConfig pointing at the standard new-gen URL."""
-    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1")
+    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264")

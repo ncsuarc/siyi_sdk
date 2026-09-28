@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from siyi_sdk.stream import CameraGeneration, SIYIStream, StreamConfig, build_rtsp_url
+from siyi_sdk.stream import SIYIStream, StreamConfig, build_rtsp_url
 
 
 @pytest.mark.hil
@@ -23,7 +23,7 @@ async def test_rtsp_receives_frames_opencv() -> None:
     import cv2  # noqa: F401  # camera test requires OpenCV
 
     config = StreamConfig(
-        rtsp_url=build_rtsp_url(generation=CameraGeneration.NEW),
+        rtsp_url=build_rtsp_url(),
         backend="opencv",  # type: ignore[arg-type]
     )
     stream = SIYIStream(config)

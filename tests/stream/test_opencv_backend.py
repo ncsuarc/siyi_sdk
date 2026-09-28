@@ -26,7 +26,7 @@ from siyi_sdk.stream.opencv_backend import OpenCVBackend  # noqa: E402
 
 @pytest.fixture
 def config() -> StreamConfig:
-    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1", buffer_size=2)
+    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264", buffer_size=2)
 
 
 class TestOpenCVBackendInit:
@@ -111,7 +111,7 @@ class TestOpenCVBackendFrameCapture:
 
 class TestOpenCVBackendRtspUrl:
     def test_build_rtsp_url_matches_config(self) -> None:
-        url = build_rtsp_url(host="192.168.144.25", stream="main")
+        url = build_rtsp_url(host="192.168.144.25")
         cfg = StreamConfig(rtsp_url=url)
         backend = OpenCVBackend(cfg)
         assert backend._config.rtsp_url == "rtsp://192.168.144.25:8554/main.264"

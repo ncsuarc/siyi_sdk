@@ -46,7 +46,7 @@ async def main() -> None:
 
         try:
             gi = await client.get_gimbal_system_info()
-            print(f"gimbal system info  laser_state={gi.laser_state}")
+            print(f"gimbal system info  {gi}")
         except TimeoutError:
             print("gimbal system info: not supported by this model")
 

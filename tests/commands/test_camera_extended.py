@@ -74,7 +74,7 @@ class TestSDFormat:
 class TestPicNameType:
     def test_encode_get(self):
         assert encode_get_pic_name_type(FileType.PICTURE) == b"\x00"
-        assert encode_get_pic_name_type(FileType.TEMP_RAW) == b"\x01"
+        assert encode_get_pic_name_type(FileType.RECORD_VIDEO) == b"\x02"
 
     def test_decode_get(self):
         payload = b"\x00\x01"

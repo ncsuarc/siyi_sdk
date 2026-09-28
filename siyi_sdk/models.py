@@ -25,23 +25,12 @@ from typing import Final
 class ProductID(IntEnum):
     """Product identification codes (first byte of hardware ID)."""
 
-    ZR10 = 0x6B
     A8_MINI = 0x73
-    A2_MINI = 0x75
-    ZR30 = 0x78
-    QUAD_SPECTRUM = 0x7A
 
     @property
     def label(self) -> str:
         """Human-readable product name (e.g. 'A8 Mini')."""
-        _labels: dict[int, str] = {
-            0x6B: "ZR10",
-            0x73: "A8 Mini",
-            0x75: "A2 Mini",
-            0x78: "ZR30",
-            0x7A: "Quad Spectrum",
-        }
-        return _labels.get(self.value, self.name)
+        return "A8 Mini"
 
 
 # =============================================================================
@@ -121,7 +110,6 @@ class CaptureFuncType(IntEnum):
     """Capture photo / record video function types."""
 
     PHOTO = 0
-    HDR_TOGGLE = 1
     START_RECORD = 2
     LOCK_MODE = 3
     FOLLOW_MODE = 4
@@ -130,7 +118,6 @@ class CaptureFuncType(IntEnum):
     ENABLE_CVBS = 7
     DISABLE_HDMI_CVBS = 8
     TILT_DOWNWARD = 9
-    ZOOM_LINKAGE = 10
 
 
 class VideoEncType(IntEnum):
@@ -148,70 +135,6 @@ class StreamType(IntEnum):
     SUB = 2
 
 
-class VideoStitchingMode(IntEnum):
-    """Video stitching mode (for multi-sensor cameras)."""
-
-    MODE_0 = 0  # Stitching: Main=Zoom&Thermal, Sub=Wide
-    MODE_1 = 1  # Stitching: Main=Wide&Thermal, Sub=Zoom
-    MODE_2 = 2  # Stitching: Main=Zoom&Wide, Sub=Thermal
-    MODE_3 = 3  # Non-stitching: Main=Zoom, Sub=Thermal
-    MODE_4 = 4  # Non-stitching: Main=Zoom, Sub=Wide
-    MODE_5 = 5  # Non-stitching: Main=Wide, Sub=Thermal
-    MODE_6 = 6  # Non-stitching: Main=Wide, Sub=Zoom
-    MODE_7 = 7  # Non-stitching: Main=Thermal, Sub=Zoom
-    MODE_8 = 8  # Non-stitching: Main=Thermal, Sub=Wide
-
-
-# =============================================================================
-# Thermal Imaging Enumerations
-# =============================================================================
-
-
-class PseudoColor(IntEnum):
-    """Thermal imaging pseudo-color palette."""
-
-    WHITE_HOT = 0
-    RESERVED = 1
-    SEPIA = 2
-    IRONBOW = 3
-    RAINBOW = 4
-    NIGHT = 5
-    AURORA = 6
-    RED_HOT = 7
-    JUNGLE = 8
-    MEDICAL = 9
-    BLACK_HOT = 10
-    GLORY_HOT = 11
-
-
-class TempMeasureFlag(IntEnum):
-    """Temperature measurement mode flag."""
-
-    DISABLE = 0
-    MEASURE_ONCE = 1
-    CONTINUOUS_5HZ = 2
-
-
-class ThermalOutputMode(IntEnum):
-    """Thermal imaging output mode."""
-
-    FPS30 = 0
-    FPS25_PLUS_TEMP = 1
-
-
-class ThermalGain(IntEnum):
-    """Thermal imaging gain mode."""
-
-    LOW = 0
-    HIGH = 1
-
-
-class IRThreshPrecision(IntEnum):
-    """IR threshold precision level."""
-
-    MAX = 1
-    MID = 2
-    MIN = 3
 
 
 # =============================================================================
@@ -230,7 +153,6 @@ class GimbalDataType(IntEnum):
     """Gimbal data stream type."""
 
     ATTITUDE = 1
-    LASER_RANGE = 2
     MAGNETIC_ENCODER = 3
     MOTOR_VOLTAGE = 4
 
@@ -248,38 +170,6 @@ class DataStreamFreq(IntEnum):
     HZ100 = 7
 
 
-# =============================================================================
-# AI Tracking Enumerations
-# =============================================================================
-
-
-class AITargetID(IntEnum):
-    """AI tracking target identification."""
-
-    HUMAN = 0
-    CAR = 1
-    BUS = 2
-    TRUCK = 3
-    ANY = 255
-
-
-class AITrackStatus(IntEnum):
-    """AI tracking status."""
-
-    NORMAL_AI = 0
-    INTERMITTENT_LOSS = 1
-    LOST = 2
-    USER_CANCELED = 3
-    NORMAL_ANY = 4
-
-
-class AIStreamStatus(IntEnum):
-    """AI tracking coordinate stream status."""
-
-    DISABLED = 0
-    STREAMING = 1
-    AI_NOT_ENABLED = 2
-    TRACKING_NOT_ENABLED = 3
 
 
 # =============================================================================
@@ -291,7 +181,6 @@ class FileType(IntEnum):
     """File type for naming conventions."""
 
     PICTURE = 0
-    TEMP_RAW = 1
     RECORD_VIDEO = 2
 
 
@@ -502,22 +391,6 @@ class AircraftAttitude:
 
 
 @dataclass(frozen=True, slots=True)
-class RCChannels:
-    """RC channel data (0x23 send format).
-
-    Attributes:
-        chans: Tuple of 18 channel values in microseconds.
-        chancount: Total number of RC channels being received.
-        rssi: Receive signal strength indicator (0-254, 255=unknown).
-
-    """
-
-    chans: tuple[int, ...]
-    chancount: int
-    rssi: int
-
-
-@dataclass(frozen=True, slots=True)
 class MagneticEncoderAngles:
     """Magnetic encoder angle data (0x26 response).
 
@@ -598,134 +471,8 @@ class EncodingParams:
     frame_rate: int
 
 
-# =============================================================================
-# Temperature Measurement
-# =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class TempPoint:
-    """Temperature at a specific point (0x12 response).
-
-    Attributes:
-        x: X coordinate of the point.
-        y: Y coordinate of the point.
-        temperature_c: Temperature in Celsius (raw/100).
-
-    """
-
-    x: int
-    y: int
-    temperature_c: float
-
-
-@dataclass(frozen=True, slots=True)
-class TempRegion:
-    """Temperature measurement in a region (0x13 response).
-
-    Attributes:
-        startx: Starting X coordinate of rectangle.
-        starty: Starting Y coordinate of rectangle.
-        endx: Ending X coordinate of rectangle.
-        endy: Ending Y coordinate of rectangle.
-        max_c: Maximum temperature in Celsius.
-        min_c: Minimum temperature in Celsius.
-        max_x: X coordinate of maximum temperature.
-        max_y: Y coordinate of maximum temperature.
-        min_x: X coordinate of minimum temperature.
-        min_y: Y coordinate of minimum temperature.
-
-    """
-
-    startx: int
-    starty: int
-    endx: int
-    endy: int
-    max_c: float
-    min_c: float
-    max_x: int
-    max_y: int
-    min_x: int
-    min_y: int
-
-
-@dataclass(frozen=True, slots=True)
-class TempGlobal:
-    """Global temperature measurement (0x14 response).
-
-    Attributes:
-        max_c: Maximum temperature in the frame in Celsius.
-        min_c: Minimum temperature in the frame in Celsius.
-        max_x: X coordinate of maximum temperature.
-        max_y: Y coordinate of maximum temperature.
-        min_x: X coordinate of minimum temperature.
-        min_y: Y coordinate of minimum temperature.
-
-    """
-
-    max_c: float
-    min_c: float
-    max_x: int
-    max_y: int
-    min_x: int
-    min_y: int
-
-
-@dataclass(frozen=True, slots=True)
-class EnvCorrectionParams:
-    """Environmental correction parameters (0x39/0x3A response).
-
-    All values are raw uint16 divided by 100.
-
-    Attributes:
-        distance_m: Distance to target in meters.
-        emissivity_pct: Target emissivity percentage.
-        humidity_pct: Environmental humidity percentage.
-        ambient_c: Atmospheric temperature in Celsius.
-        reflective_c: Reflective temperature in Celsius.
-
-    """
-
-    distance_m: float
-    emissivity_pct: float
-    humidity_pct: float
-    ambient_c: float
-    reflective_c: float
-
-
-# =============================================================================
-# Laser Ranging
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class LaserDistance:
-    """Laser distance measurement (0x15 response).
-
-    Attributes:
-        distance_m: Distance in meters, or None if out of range.
-            Raw value is in decimeters, divided by 10.
-            Returns None if raw < 50 or raw == 0.
-
-    """
-
-    distance_m: float | None
-
-
-@dataclass(frozen=True, slots=True)
-class LaserTargetLatLon:
-    """Laser target latitude/longitude (0x17 response).
-
-    Coordinates are in WGS84/EGM96 ellipsoid.
-
-    Attributes:
-        lat_e7: Latitude in degrees * 10^7.
-        lon_e7: Longitude in degrees * 10^7.
-
-    """
-
-    lat_e7: int
-    lon_e7: int
 
 
 # =============================================================================
@@ -848,73 +595,6 @@ class GimbalSystemInfo:
 # =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class IRThreshRegion:
-    """IR threshold region parameters.
-
-    Attributes:
-        switch: Region enable switch (0=hide, 1=display).
-        temp_min: Minimum temperature threshold.
-        temp_max: Maximum temperature threshold.
-        color_r: Red component of region color (0-255).
-        color_g: Green component of region color (0-255).
-        color_b: Blue component of region color (0-255).
-
-    """
-
-    switch: int
-    temp_min: int
-    temp_max: int
-    color_r: int
-    color_g: int
-    color_b: int
-
-
-@dataclass(frozen=True, slots=True)
-class IRThreshParams:
-    """IR threshold parameters (0x44/0x45 response).
-
-    Contains 3 threshold regions for thermal imaging.
-
-    Attributes:
-        region1: First threshold region.
-        region2: Second threshold region.
-        region3: Third threshold region.
-
-    """
-
-    region1: IRThreshRegion
-    region2: IRThreshRegion
-    region3: IRThreshRegion
-
-
-# =============================================================================
-# AI Tracking
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class AITrackingTarget:
-    """AI tracking target information (0x50 response).
-
-    Pixel coordinates are based on 1280x720 resolution.
-
-    Attributes:
-        x: Target center X coordinate.
-        y: Target center Y coordinate.
-        w: Target bounding box width.
-        h: Target bounding box height.
-        target_id: Target type identification.
-        status: Tracking status.
-
-    """
-
-    x: int
-    y: int
-    w: int
-    h: int
-    target_id: AITargetID
-    status: AITrackStatus
 
 
 # =============================================================================
@@ -961,15 +641,9 @@ class AngleLimits:
     pitch_max: float
 
 
-# Per-product angle limits table
+# A8 Mini angle limits
 ANGLE_LIMITS: Final[dict[ProductID, AngleLimits]] = {
-    ProductID.ZR10: AngleLimits(yaw_min=-135.0, yaw_max=135.0, pitch_min=-90.0, pitch_max=25.0),
     ProductID.A8_MINI: AngleLimits(yaw_min=-135.0, yaw_max=135.0, pitch_min=-90.0, pitch_max=25.0),
-    ProductID.ZR30: AngleLimits(yaw_min=-270.0, yaw_max=270.0, pitch_min=-90.0, pitch_max=25.0),
-    ProductID.A2_MINI: AngleLimits(yaw_min=0.0, yaw_max=0.0, pitch_min=-90.0, pitch_max=25.0),
-    ProductID.QUAD_SPECTRUM: AngleLimits(
-        yaw_min=-360.0, yaw_max=360.0, pitch_min=-90.0, pitch_max=25.0
-    ),
 }
 
 

@@ -22,26 +22,7 @@ from numpy.typing import NDArray
 _RECONNECT_DELAY_CAP: float = 30.0
 
 
-class CameraGeneration(str, Enum):
-    """RTSP URL scheme generation boundary is ZT30.
 
-    OLD refers to cameras released before ZT30 (ZR30, ZR10, A8 Mini, A2 Mini, R1M).
-    NEW refers to ZT30, ZT6, and all later models.
-    """
-
-    OLD = "old"
-    NEW = "new"
-
-
-CAMERA_GENERATION_MAP: dict[str, CameraGeneration] = {
-    "zt30": CameraGeneration.NEW,
-    "zt6": CameraGeneration.NEW,
-    "zr30": CameraGeneration.OLD,
-    "zr10": CameraGeneration.OLD,
-    "a8": CameraGeneration.OLD,
-    "a2": CameraGeneration.OLD,
-    "r1m": CameraGeneration.OLD,
-}
 
 
 class StreamBackend(str, Enum):
@@ -134,38 +115,6 @@ class StreamFrame:
     backend: str
 
 
-def build_rtsp_url(
-    host: str = "192.168.144.25",
-    stream: Literal["main", "sub"] = "main",
-    generation: CameraGeneration = CameraGeneration.OLD,
-) -> str:
-    """Return the correct RTSP URL for the given host, stream slot, and camera generation.
-
-    Old-gen cameras (ZR30/ZR10/A8Mini/A2Mini/R1M) expose only a single RTSP stream via
-    ``/main.264``; requesting a sub stream raises ValueError.
-
-    New-gen cameras (ZT30/ZT6 and later) expose ``/video1`` (main) and ``/video2`` (sub).
-
-    Args:
-        host: Camera IP address.
-        stream: "main" for primary stream, "sub" for secondary (new-gen only).
-        generation: Camera generation determining the URL path scheme.
-
-    Returns:
-        Full RTSP URL string.
-
-    Example:
-        >>> build_rtsp_url(generation=CameraGeneration.NEW, stream="sub")
-        'rtsp://192.168.144.25:8554/video2'
-        >>> build_rtsp_url(generation=CameraGeneration.OLD)
-        'rtsp://192.168.144.25:8554/main.264'
-    """
-    generation = CameraGeneration(generation)
-    if stream not in ("main", "sub"):
-        raise ValueError("stream must be 'main' or 'sub'")
-    if generation is CameraGeneration.OLD:
-        if stream != "main":
-            raise ValueError("Old-generation cameras, including A8 Mini, have no sub stream")
-        return f"rtsp://{host}:8554/main.264"
-    path = "video1" if stream == "main" else "video2"
-    return f"rtsp://{host}:8554/{path}"
+def build_rtsp_url(host: str = "192.168.144.25") -> str:
+    """Return the A8 Mini main RTSP stream URL."""
+    return f"rtsp://{host}:8554/main.264"

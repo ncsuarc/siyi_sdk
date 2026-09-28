@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "siyi-sdk"
 version = "0.6.0"
-description = "Async Python SDK for the SIYI Gimbal Camera External SDK Protocol v0.1.1"
+description = "Async Python SDK for the SIYI A8 Mini gimbal camera"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

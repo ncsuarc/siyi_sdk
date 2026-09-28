@@ -19,30 +19,11 @@ from siyi_sdk import models
 class TestProductID:
     """Test ProductID enumeration."""
 
-    def test_zr10(self):
-        """ZR10 should have value 0x6B."""
-        assert models.ProductID.ZR10 == 0x6B
-        assert models.ProductID(0x6B).name == "ZR10"
 
     def test_a8_mini(self):
         """A8_MINI should have value 0x73."""
         assert models.ProductID.A8_MINI == 0x73
         assert models.ProductID(0x73).name == "A8_MINI"
-
-    def test_a2_mini(self):
-        """A2_MINI should have value 0x75."""
-        assert models.ProductID.A2_MINI == 0x75
-        assert models.ProductID(0x75).name == "A2_MINI"
-
-    def test_zr30(self):
-        """ZR30 should have value 0x78."""
-        assert models.ProductID.ZR30 == 0x78
-        assert models.ProductID(0x78).name == "ZR30"
-
-    def test_quad_spectrum(self):
-        """QUAD_SPECTRUM should have value 0x7A."""
-        assert models.ProductID.QUAD_SPECTRUM == 0x7A
-        assert models.ProductID(0x7A).name == "QUAD_SPECTRUM"
 
 
 class TestGimbalMotionMode:
@@ -105,7 +86,6 @@ class TestCaptureFuncType:
     def test_values(self):
         """CaptureFuncType values should match spec."""
         assert models.CaptureFuncType.PHOTO == 0
-        assert models.CaptureFuncType.HDR_TOGGLE == 1
         assert models.CaptureFuncType.START_RECORD == 2
         assert models.CaptureFuncType.LOCK_MODE == 3
         assert models.CaptureFuncType.FOLLOW_MODE == 4
@@ -114,7 +94,6 @@ class TestCaptureFuncType:
         assert models.CaptureFuncType.ENABLE_CVBS == 7
         assert models.CaptureFuncType.DISABLE_HDMI_CVBS == 8
         assert models.CaptureFuncType.TILT_DOWNWARD == 9
-        assert models.CaptureFuncType.ZOOM_LINKAGE == 10
 
 
 class TestCenteringAction:
@@ -147,79 +126,6 @@ class TestStreamType:
         assert models.StreamType.SUB == 2
 
 
-class TestVideoStitchingMode:
-    """Test VideoStitchingMode enumeration."""
-
-    def test_values(self):
-        """VideoStitchingMode should have 9 modes (0-8)."""
-        assert models.VideoStitchingMode.MODE_0 == 0
-        assert models.VideoStitchingMode.MODE_1 == 1
-        assert models.VideoStitchingMode.MODE_2 == 2
-        assert models.VideoStitchingMode.MODE_3 == 3
-        assert models.VideoStitchingMode.MODE_4 == 4
-        assert models.VideoStitchingMode.MODE_5 == 5
-        assert models.VideoStitchingMode.MODE_6 == 6
-        assert models.VideoStitchingMode.MODE_7 == 7
-        assert models.VideoStitchingMode.MODE_8 == 8
-
-
-class TestPseudoColor:
-    """Test PseudoColor enumeration."""
-
-    def test_values(self):
-        """PseudoColor values should match spec."""
-        assert models.PseudoColor.WHITE_HOT == 0
-        assert models.PseudoColor.RESERVED == 1
-        assert models.PseudoColor.SEPIA == 2
-        assert models.PseudoColor.IRONBOW == 3
-        assert models.PseudoColor.RAINBOW == 4
-        assert models.PseudoColor.NIGHT == 5
-        assert models.PseudoColor.AURORA == 6
-        assert models.PseudoColor.RED_HOT == 7
-        assert models.PseudoColor.JUNGLE == 8
-        assert models.PseudoColor.MEDICAL == 9
-        assert models.PseudoColor.BLACK_HOT == 10
-        assert models.PseudoColor.GLORY_HOT == 11
-
-
-class TestTempMeasureFlag:
-    """Test TempMeasureFlag enumeration."""
-
-    def test_values(self):
-        """TempMeasureFlag values should match spec."""
-        assert models.TempMeasureFlag.DISABLE == 0
-        assert models.TempMeasureFlag.MEASURE_ONCE == 1
-        assert models.TempMeasureFlag.CONTINUOUS_5HZ == 2
-
-
-class TestThermalOutputMode:
-    """Test ThermalOutputMode enumeration."""
-
-    def test_values(self):
-        """ThermalOutputMode values should match spec."""
-        assert models.ThermalOutputMode.FPS30 == 0
-        assert models.ThermalOutputMode.FPS25_PLUS_TEMP == 1
-
-
-class TestThermalGain:
-    """Test ThermalGain enumeration."""
-
-    def test_values(self):
-        """ThermalGain values should match spec."""
-        assert models.ThermalGain.LOW == 0
-        assert models.ThermalGain.HIGH == 1
-
-
-class TestIRThreshPrecision:
-    """Test IRThreshPrecision enumeration."""
-
-    def test_values(self):
-        """IRThreshPrecision values should match spec."""
-        assert models.IRThreshPrecision.MAX == 1
-        assert models.IRThreshPrecision.MID == 2
-        assert models.IRThreshPrecision.MIN == 3
-
-
 class TestFCDataType:
     """Test FCDataType enumeration."""
 
@@ -235,7 +141,6 @@ class TestGimbalDataType:
     def test_values(self):
         """GimbalDataType values should match spec."""
         assert models.GimbalDataType.ATTITUDE == 1
-        assert models.GimbalDataType.LASER_RANGE == 2
         assert models.GimbalDataType.MAGNETIC_ENCODER == 3
         assert models.GimbalDataType.MOTOR_VOLTAGE == 4
 
@@ -267,48 +172,12 @@ class TestControlMode:
         assert models.ControlMode.MOTOR_CLOSE == 4
 
 
-class TestAITargetID:
-    """Test AITargetID enumeration."""
-
-    def test_values(self):
-        """AITargetID values should match spec."""
-        assert models.AITargetID.HUMAN == 0
-        assert models.AITargetID.CAR == 1
-        assert models.AITargetID.BUS == 2
-        assert models.AITargetID.TRUCK == 3
-        assert models.AITargetID.ANY == 255
-
-
-class TestAITrackStatus:
-    """Test AITrackStatus enumeration."""
-
-    def test_values(self):
-        """AITrackStatus values should match spec."""
-        assert models.AITrackStatus.NORMAL_AI == 0
-        assert models.AITrackStatus.INTERMITTENT_LOSS == 1
-        assert models.AITrackStatus.LOST == 2
-        assert models.AITrackStatus.USER_CANCELED == 3
-        assert models.AITrackStatus.NORMAL_ANY == 4
-
-
-class TestAIStreamStatus:
-    """Test AIStreamStatus enumeration."""
-
-    def test_values(self):
-        """AIStreamStatus values should match spec."""
-        assert models.AIStreamStatus.DISABLED == 0
-        assert models.AIStreamStatus.STREAMING == 1
-        assert models.AIStreamStatus.AI_NOT_ENABLED == 2
-        assert models.AIStreamStatus.TRACKING_NOT_ENABLED == 3
-
-
 class TestFileType:
     """Test FileType enumeration."""
 
     def test_values(self):
         """FileType values should match spec."""
         assert models.FileType.PICTURE == 0
-        assert models.FileType.TEMP_RAW == 1
         assert models.FileType.RECORD_VIDEO == 2
 
 
@@ -369,10 +238,6 @@ class TestHardwareID:
         """HardwareID should have slots."""
         assert hasattr(models.HardwareID, "__slots__")
 
-    def test_product_id_zr10(self):
-        """product_id property should return ProductID for ZR10."""
-        hw = models.HardwareID(raw=b"6b" + b"\x00" * 10)
-        assert hw.product_id == models.ProductID.ZR10
 
     def test_product_id_a8_mini(self):
         """product_id property should return ProductID for A8_MINI."""
@@ -416,43 +281,12 @@ class TestAngleLimits:
         for product in models.ProductID:
             assert product in models.ANGLE_LIMITS, f"Missing {product.name}"
 
-    def test_zr10_limits(self):
-        """ZR10 angle limits should match spec."""
-        limits = models.ANGLE_LIMITS[models.ProductID.ZR10]
-        assert limits.yaw_min == -135.0
-        assert limits.yaw_max == 135.0
-        assert limits.pitch_min == -90.0
-        assert limits.pitch_max == 25.0
 
     def test_a8_mini_limits(self):
-        """A8_MINI angle limits should match spec (same as ZR10)."""
+        """A8 Mini angle limits should match its documented control range."""
         limits = models.ANGLE_LIMITS[models.ProductID.A8_MINI]
         assert limits.yaw_min == -135.0
         assert limits.yaw_max == 135.0
-        assert limits.pitch_min == -90.0
-        assert limits.pitch_max == 25.0
-
-    def test_zr30_limits(self):
-        """ZR30 angle limits should match spec."""
-        limits = models.ANGLE_LIMITS[models.ProductID.ZR30]
-        assert limits.yaw_min == -270.0
-        assert limits.yaw_max == 270.0
-        assert limits.pitch_min == -90.0
-        assert limits.pitch_max == 25.0
-
-    def test_a2_mini_limits(self):
-        """A2_MINI angle limits (fixed yaw)."""
-        limits = models.ANGLE_LIMITS[models.ProductID.A2_MINI]
-        assert limits.yaw_min == 0.0
-        assert limits.yaw_max == 0.0
-        assert limits.pitch_min == -90.0
-        assert limits.pitch_max == 25.0
-
-    def test_quad_spectrum_limits(self):
-        """QUAD_SPECTRUM angle limits (unlimited yaw)."""
-        limits = models.ANGLE_LIMITS[models.ProductID.QUAD_SPECTRUM]
-        assert limits.yaw_min == -360.0
-        assert limits.yaw_max == 360.0
         assert limits.pitch_min == -90.0
         assert limits.pitch_max == 25.0
 
@@ -464,14 +298,7 @@ _DATACLASSES = [
     models.GimbalAttitude,
     models.SetAttitudeAck,
     models.AircraftAttitude,
-    models.RCChannels,
     models.EncodingParams,
-    models.TempPoint,
-    models.TempRegion,
-    models.TempGlobal,
-    models.EnvCorrectionParams,
-    models.LaserDistance,
-    models.LaserTargetLatLon,
     models.ZoomRange,
     models.CurrentZoom,
     models.RawGPS,
@@ -480,9 +307,6 @@ _DATACLASSES = [
     models.WeakControlThreshold,
     models.SystemTime,
     models.GimbalSystemInfo,
-    models.IRThreshRegion,
-    models.IRThreshParams,
-    models.AITrackingTarget,
     models.IPConfig,
     models.AngleLimits,
 ]

@@ -1,93 +1,24 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""Tests for siyi_sdk.stream.models."""
+"""A8 Mini RTSP URL and stream model checks."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from siyi_sdk.stream.models import (
-    CAMERA_GENERATION_MAP,
-    CameraGeneration,
-    StreamBackend,
-    StreamConfig,
-    StreamFrame,
-    build_rtsp_url,
-)
+from siyi_sdk.stream.models import StreamBackend, StreamConfig, StreamFrame, build_rtsp_url
 
 
 class TestBuildRtspUrl:
-    def test_new_gen_main(self) -> None:
-        url = build_rtsp_url(generation=CameraGeneration.NEW, stream="main")
-        assert url == "rtsp://192.168.144.25:8554/video1"
-
-    def test_new_gen_sub(self) -> None:
-        url = build_rtsp_url(generation=CameraGeneration.NEW, stream="sub")
-        assert url == "rtsp://192.168.144.25:8554/video2"
-
-    def test_old_gen_main(self) -> None:
-        url = build_rtsp_url(generation=CameraGeneration.OLD, stream="main")
-        assert url == "rtsp://192.168.144.25:8554/main.264"
-
-    def test_old_gen_sub_rejected(self) -> None:
-        with pytest.raises(ValueError, match="no sub stream"):
-            build_rtsp_url(generation=CameraGeneration.OLD, stream="sub")
+    def test_default_host(self) -> None:
+        assert build_rtsp_url() == "rtsp://192.168.144.25:8554/main.264"
 
     def test_custom_host(self) -> None:
-        url = build_rtsp_url(host="10.0.0.1", generation=CameraGeneration.NEW)
-        assert url == "rtsp://10.0.0.1:8554/video1"
-
-    def test_custom_host_old_gen(self) -> None:
-        url = build_rtsp_url(host="10.0.0.2", generation=CameraGeneration.OLD)
-        assert url == "rtsp://10.0.0.2:8554/main.264"
-
-    def test_default_host_new_sub(self) -> None:
-        url = build_rtsp_url(stream="sub", generation=CameraGeneration.NEW)
-        assert url == "rtsp://192.168.144.25:8554/video2"
-
-
-class TestCameraGeneration:
-    def test_old_value(self) -> None:
-        assert CameraGeneration.OLD.value == "old"
-
-    def test_new_value(self) -> None:
-        assert CameraGeneration.NEW.value == "new"
-
-    def test_is_str_enum(self) -> None:
-        assert isinstance(CameraGeneration.NEW, str)
-
-
-class TestCameraGenerationMap:
-    def test_zt30_is_new(self) -> None:
-        assert CAMERA_GENERATION_MAP["zt30"] is CameraGeneration.NEW
-
-    def test_zt6_is_new(self) -> None:
-        assert CAMERA_GENERATION_MAP["zt6"] is CameraGeneration.NEW
-
-    def test_zr30_is_old(self) -> None:
-        assert CAMERA_GENERATION_MAP["zr30"] is CameraGeneration.OLD
-
-    def test_zr10_is_old(self) -> None:
-        assert CAMERA_GENERATION_MAP["zr10"] is CameraGeneration.OLD
-
-    def test_a8_is_old(self) -> None:
-        assert CAMERA_GENERATION_MAP["a8"] is CameraGeneration.OLD
-
-    def test_a2_is_old(self) -> None:
-        assert CAMERA_GENERATION_MAP["a2"] is CameraGeneration.OLD
-
-    def test_r1m_is_old(self) -> None:
-        assert CAMERA_GENERATION_MAP["r1m"] is CameraGeneration.OLD
+        assert build_rtsp_url("10.0.0.2") == "rtsp://10.0.0.2:8554/main.264"
 
 
 class TestStreamConfig:
     def test_defaults(self) -> None:
-        cfg = StreamConfig(rtsp_url="rtsp://example.com/video1")
+        cfg = StreamConfig(rtsp_url="rtsp://example.com/main.264")
         assert cfg.backend is StreamBackend.AUTO
         assert cfg.transport == "tcp"
         assert cfg.latency_ms == 100

@@ -18,7 +18,7 @@ import pytest
 
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.exceptions import TimeoutError
-from siyi_sdk.models import FunctionFeedback, GimbalAttitude, LaserDistance
+from siyi_sdk.models import FunctionFeedback, GimbalAttitude
 from siyi_sdk.transport.mock import MockTransport
 
 
@@ -151,30 +151,6 @@ class TestStreamPushFrames:
 
         assert len(feedbacks_received) == 1
         assert feedbacks_received[0] == FunctionFeedback.PHOTO_OK
-
-        unsub()
-
-    @pytest.mark.asyncio
-    async def test_laser_distance_push_received(
-        self,
-        connected_client: SIYIClient,
-        mock_transport: MockTransport,
-        frame_laser_distance_ack: bytes,
-    ) -> None:
-        """Test reception of laser distance push (0x15)."""
-        distances_received: list[LaserDistance] = []
-
-        def on_laser(ld: LaserDistance) -> None:
-            distances_received.append(ld)
-
-        unsub = connected_client.on_laser_distance(on_laser)
-
-        # Queue laser push frame
-        mock_transport.queue_response(frame_laser_distance_ack)
-        await asyncio.sleep(0.1)
-
-        assert len(distances_received) == 1
-        assert distances_received[0].distance_m is not None
 
         unsub()
 

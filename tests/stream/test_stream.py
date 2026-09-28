@@ -32,7 +32,7 @@ def _make_frames(n: int) -> list[StreamFrame]:
 
 
 def _make_stream_with_mock(
-    frames: list[StreamFrame], rtsp_url: str = "rtsp://192.168.144.25:8554/video1"
+    frames: list[StreamFrame], rtsp_url: str = "rtsp://192.168.144.25:8554/main.264"
 ) -> SIYIStream:
     cfg = StreamConfig(rtsp_url=rtsp_url)
     stream = SIYIStream(cfg)

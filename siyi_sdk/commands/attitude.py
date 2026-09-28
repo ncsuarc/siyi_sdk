@@ -142,8 +142,8 @@ def encode_gimbal_stream(data_type: GimbalDataType, freq: DataStreamFreq) -> byt
     """Encode gimbal data stream request (0x25).
 
     Args:
-        data_type: Data type (1=attitude, 2=laser, 3=encoder, 4=motor_voltage).
-        freq: Stream frequency (ignored for laser).
+        data_type: Data type (1=attitude, 3=encoder, 4=motor_voltage).
+        freq: Stream frequency.
 
     Returns:
         2-byte payload (2 x uint8).
@@ -154,11 +154,10 @@ def encode_gimbal_stream(data_type: GimbalDataType, freq: DataStreamFreq) -> byt
     """
     if data_type not in (
         GimbalDataType.ATTITUDE,
-        GimbalDataType.LASER_RANGE,
         GimbalDataType.MAGNETIC_ENCODER,
         GimbalDataType.MOTOR_VOLTAGE,
     ):
-        raise ConfigurationError(f"data_type must be 1-4, got {data_type}")
+        raise ConfigurationError(f"data_type must be ATTITUDE, MAGNETIC_ENCODER, or MOTOR_VOLTAGE, got {data_type}")
     return struct.pack("<BB", data_type, freq)
 
 

@@ -118,22 +118,6 @@ class TestHeartbeatFrame:
         assert expected_crc == actual_crc
 
 
-class TestLaserConstants:
-    """Test laser ranging constants."""
-
-    def test_laser_min_m(self):
-        """Laser minimum distance should be 5m."""
-        assert constants.LASER_MIN_M == 5
-
-    def test_laser_max_m(self):
-        """Laser maximum distance should be 1200m."""
-        assert constants.LASER_MAX_M == 1200
-
-    def test_laser_min_raw_dm(self):
-        """Laser minimum raw value should be 50 dm."""
-        assert constants.LASER_MIN_RAW_DM == 50
-
-
 class TestCommandIDs:
     """Test command ID constants."""
 
@@ -143,9 +127,7 @@ class TestCommandIDs:
             constants.CMD_TCP_HEARTBEAT,
             constants.CMD_REQUEST_FIRMWARE_VERSION,
             constants.CMD_REQUEST_HARDWARE_ID,
-            constants.CMD_AUTO_FOCUS,
             constants.CMD_MANUAL_ZOOM_AUTO_FOCUS,
-            constants.CMD_MANUAL_FOCUS,
             constants.CMD_GIMBAL_ROTATION,
             constants.CMD_ONE_KEY_CENTERING,
             constants.CMD_REQUEST_CAMERA_SYSTEM_INFO,
@@ -154,22 +136,12 @@ class TestCommandIDs:
             constants.CMD_REQUEST_GIMBAL_ATTITUDE,
             constants.CMD_SET_GIMBAL_ATTITUDE,
             constants.CMD_ABSOLUTE_ZOOM_AUTO_FOCUS,
-            constants.CMD_REQUEST_VIDEO_STITCHING_MODE,
-            constants.CMD_SET_VIDEO_STITCHING_MODE,
-            constants.CMD_GET_TEMP_AT_POINT,
-            constants.CMD_LOCAL_TEMP_MEASUREMENT,
-            constants.CMD_GLOBAL_TEMP_MEASUREMENT,
-            constants.CMD_REQUEST_LASER_DISTANCE,
             constants.CMD_REQUEST_ZOOM_RANGE,
-            constants.CMD_REQUEST_LASER_LATLON,
             constants.CMD_REQUEST_ZOOM_MAGNIFICATION,
             constants.CMD_REQUEST_GIMBAL_MODE,
-            constants.CMD_REQUEST_PSEUDO_COLOR,
-            constants.CMD_SET_PSEUDO_COLOR,
             constants.CMD_REQUEST_ENCODING_PARAMS,
             constants.CMD_SET_ENCODING_PARAMS,
             constants.CMD_SEND_AIRCRAFT_ATTITUDE,
-            constants.CMD_SEND_RC_CHANNELS,
             constants.CMD_REQUEST_FC_DATA_STREAM,
             constants.CMD_REQUEST_GIMBAL_DATA_STREAM,
             constants.CMD_REQUEST_MAGNETIC_ENCODER,
@@ -179,35 +151,14 @@ class TestCommandIDs:
             constants.CMD_REQUEST_MOTOR_VOLTAGE,
             constants.CMD_SET_UTC_TIME,
             constants.CMD_REQUEST_GIMBAL_SYSTEM_INFO,
-            constants.CMD_SET_LASER_RANGING_STATE,
-            constants.CMD_REQUEST_THERMAL_OUTPUT_MODE,
-            constants.CMD_SET_THERMAL_OUTPUT_MODE,
-            constants.CMD_GET_SINGLE_TEMP_FRAME,
-            constants.CMD_REQUEST_THERMAL_GAIN,
-            constants.CMD_SET_THERMAL_GAIN,
-            constants.CMD_REQUEST_ENV_CORRECTION_PARAMS,
-            constants.CMD_SET_ENV_CORRECTION_PARAMS,
-            constants.CMD_REQUEST_ENV_CORRECTION_SWITCH,
-            constants.CMD_SET_ENV_CORRECTION_SWITCH,
             constants.CMD_SEND_RAW_GPS,
             constants.CMD_REQUEST_SYSTEM_TIME,
             constants.CMD_SINGLE_AXIS_ATTITUDE,
-            constants.CMD_GET_IR_THRESH_MAP_STA,
-            constants.CMD_SET_IR_THRESH_MAP_STA,
-            constants.CMD_GET_IR_THRESH_PARAM,
-            constants.CMD_SET_IR_THRESH_PARAM,
-            constants.CMD_GET_IR_THRESH_PRECISION,
-            constants.CMD_SET_IR_THRESH_PRECISION,
             constants.CMD_SD_FORMAT,
             constants.CMD_GET_PIC_NAME_TYPE,
             constants.CMD_SET_PIC_NAME_TYPE,
             constants.CMD_GET_MAVLINK_OSD_FLAG,
             constants.CMD_SET_MAVLINK_OSD_FLAG,
-            constants.CMD_GET_AI_MODE_STA,
-            constants.CMD_GET_AI_TRACK_STREAM_STA,
-            constants.CMD_MANUAL_THERMAL_SHUTTER,
-            constants.CMD_AI_TRACK_STREAM,
-            constants.CMD_SET_AI_TRACK_STREAM_STA,
             constants.CMD_REQUEST_WEAK_CONTROL_MODE,
             constants.CMD_SET_WEAK_CONTROL_MODE,
             constants.CMD_SOFT_REBOOT,
@@ -232,25 +183,13 @@ class TestCommandIDs:
 class TestHardwareIDs:
     """Test hardware ID constants."""
 
-    def test_hw_id_zr10(self):
-        """ZR10 hardware ID should be 0x6B."""
-        assert constants.HW_ID_ZR10 == 0x6B
 
     def test_hw_id_a8_mini(self):
         """A8 Mini hardware ID should be 0x73."""
         assert constants.HW_ID_A8_MINI == 0x73
 
-    def test_hw_id_a2_mini(self):
-        """A2 Mini hardware ID should be 0x75."""
-        assert constants.HW_ID_A2_MINI == 0x75
 
-    def test_hw_id_zr30(self):
-        """ZR30 hardware ID should be 0x78."""
-        assert constants.HW_ID_ZR30 == 0x78
 
-    def test_hw_id_quad_spectrum(self):
-        """Quad Spectrum hardware ID should be 0x7A."""
-        assert constants.HW_ID_QUAD_SPECTRUM == 0x7A
 
 
 class TestA8MiniLimits:

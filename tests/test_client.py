@@ -19,23 +19,18 @@ from siyi_sdk.constants import (
     CMD_CAPTURE_PHOTO_RECORD_VIDEO,
     CMD_REQUEST_FIRMWARE_VERSION,
     CMD_REQUEST_GIMBAL_ATTITUDE,
-    CMD_REQUEST_LASER_DISTANCE,
     CMD_SEND_AIRCRAFT_ATTITUDE,
     CMD_SEND_RAW_GPS,
-    CMD_SEND_RC_CHANNELS,
 )
 from siyi_sdk.exceptions import TimeoutError
 from siyi_sdk.models import (
     AircraftAttitude,
-    AIStreamStatus,
-    AITrackingTarget,
     CameraSystemInfo,
     CaptureFuncType,
     CenteringAction,
     ControlMode,
     DataStreamFreq,
     EncodingParams,
-    EnvCorrectionParams,
     FCDataType,
     FileNameType,
     FileType,
@@ -47,27 +42,13 @@ from siyi_sdk.models import (
     GimbalSystemInfo,
     HardwareID,
     IPConfig,
-    IRThreshParams,
-    IRThreshPrecision,
-    IRThreshRegion,
-    LaserDistance,
-    LaserTargetLatLon,
     MagneticEncoderAngles,
     MotorVoltage,
-    PseudoColor,
     RawGPS,
-    RCChannels,
     SetAttitudeAck,
     StreamType,
     SystemTime,
-    TempGlobal,
-    TempMeasureFlag,
-    TempPoint,
-    TempRegion,
-    ThermalGain,
-    ThermalOutputMode,
     VideoEncType,
-    VideoStitchingMode,
     WeakControlThreshold,
     ZoomRange,
 )
@@ -401,21 +382,6 @@ class TestCommandExecution:
 
         await client.close()
 
-    @pytest.mark.asyncio
-    async def test_fire_and_forget_send_rc_channels(self, mock_transport: MockTransport) -> None:
-        """Test send_rc_channels is fire-and-forget."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        ch = RCChannels(chans=tuple([1500] * 18), chancount=16, rssi=200)
-
-        with pytest.warns(DeprecationWarning):
-            await client.send_rc_channels(ch)
-
-        sent_frame = Frame.from_bytes(mock_transport.sent_frames[0])
-        assert sent_frame.cmd_id == CMD_SEND_RC_CHANNELS
-
-        await client.close()
 
     @pytest.mark.asyncio
     async def test_fire_and_forget_send_raw_gps(self, mock_transport: MockTransport) -> None:
@@ -483,32 +449,6 @@ class TestStreamSubscriptions:
 
         await client.close()
 
-    @pytest.mark.asyncio
-    async def test_on_laser_distance_subscription(self, mock_transport: MockTransport) -> None:
-        """Test laser distance stream subscription."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        received: list[LaserDistance] = []
-
-        def callback(laser: LaserDistance) -> None:
-            received.append(laser)
-
-        unsub = client.on_laser_distance(callback)
-
-        # Queue 3 laser push frames (raw value 1000 = 100.0 m)
-        for i in range(3):
-            payload = b"\xe8\x03"  # 1000 in little-endian
-            frame = Frame.build(CMD_REQUEST_LASER_DISTANCE, payload, seq=i, need_ack=False)
-            mock_transport.queue_response(frame.to_bytes())
-
-        await asyncio.sleep(0.2)
-
-        assert len(received) == 3
-        assert all(ld.distance_m == 100.0 for ld in received)
-
-        unsub()
-        await client.close()
 
     @pytest.mark.asyncio
     async def test_on_function_feedback_subscription(self, mock_transport: MockTransport) -> None:
@@ -533,32 +473,6 @@ class TestStreamSubscriptions:
 
         assert len(received) == 2
         assert all(fb == FunctionFeedback.PHOTO_OK for fb in received)
-
-        unsub()
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_on_ai_tracking_subscription(self, mock_transport: MockTransport) -> None:
-        """Test AI tracking stream subscription."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        received: list[AITrackingTarget] = []
-
-        def callback(target: AITrackingTarget) -> None:
-            received.append(target)
-
-        unsub = client.on_ai_tracking(callback)
-
-        # Queue 2 AI tracking frames
-        for i in range(2):
-            payload = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"  # 10 bytes
-            frame = Frame.build(0x50, payload, seq=i, need_ack=False)
-            mock_transport.queue_response(frame.to_bytes())
-
-        await asyncio.sleep(0.2)
-
-        assert len(received) == 2
 
         unsub()
         await client.close()
@@ -726,23 +640,9 @@ class TestSystemCommands:
         await client.close()
 
 
-class TestFocusZoomCommands:
-    """Test focus and zoom commands."""
+class TestDigitalZoomCommands:
+    """Test digital zoom commands."""
 
-    @pytest.mark.asyncio
-    async def test_auto_focus(self, mock_transport: MockTransport) -> None:
-        """Test auto_focus."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"  # Success
-        ack_frame = Frame.build(0x04, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        await client.auto_focus(50, 50)
-
-        await client.close()
 
     @pytest.mark.asyncio
     async def test_manual_zoom(self, mock_transport: MockTransport) -> None:
@@ -761,20 +661,6 @@ class TestFocusZoomCommands:
 
         await client.close()
 
-    @pytest.mark.asyncio
-    async def test_manual_focus(self, mock_transport: MockTransport) -> None:
-        """Test manual_focus."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x06, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        await client.manual_focus(1)
-
-        await client.close()
 
     @pytest.mark.asyncio
     async def test_absolute_zoom(self, mock_transport: MockTransport) -> None:
@@ -1228,532 +1114,6 @@ class TestCameraCommands:
         mock_transport.queue_response(ack_frame.to_bytes())
 
         result = await client.set_osd_flag(True)
-
-        assert result is True
-
-        await client.close()
-
-
-class TestVideoCommands:
-    """Test video stitching commands."""
-
-    @pytest.mark.asyncio
-    async def test_get_video_stitching_mode(self, mock_transport: MockTransport) -> None:
-        """Test get_video_stitching_mode."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x00"  # MODE_0
-        ack_frame = Frame.build(0x10, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        mode = await client.get_video_stitching_mode()
-
-        assert mode == VideoStitchingMode.MODE_0
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_video_stitching_mode(self, mock_transport: MockTransport) -> None:
-        """Test set_video_stitching_mode."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x03"  # MODE_3
-        ack_frame = Frame.build(0x11, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        new_mode = await client.set_video_stitching_mode(VideoStitchingMode.MODE_3)
-
-        assert new_mode == VideoStitchingMode.MODE_3
-
-        await client.close()
-
-
-class TestThermalCommands:
-    """Test thermal imaging commands."""
-
-    @pytest.mark.asyncio
-    async def test_temp_at_point(self, mock_transport: MockTransport) -> None:
-        """Test temp_at_point."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (6 bytes: temp, x, y)
-        ack_payload = b"\x64\x00\x32\x00\x1e\x00"  # temp=100 (1.0°C), x=50, y=30
-        ack_frame = Frame.build(0x12, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        temp = await client.temp_at_point(50, 30, TempMeasureFlag.MEASURE_ONCE)
-
-        assert isinstance(temp, TempPoint)
-        assert temp.x == 50
-        assert temp.y == 30
-        assert temp.temperature_c == 1.0
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_temp_region(self, mock_transport: MockTransport) -> None:
-        """Test temp_region."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (20 bytes)
-        ack_payload = b"\x00\x00" * 10
-        ack_frame = Frame.build(0x13, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        temp = await client.temp_region((10, 10, 100, 100), TempMeasureFlag.MEASURE_ONCE)
-
-        assert isinstance(temp, TempRegion)
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_temp_global(self, mock_transport: MockTransport) -> None:
-        """Test temp_global."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (12 bytes)
-        ack_payload = b"\x00\x00" * 6
-        ack_frame = Frame.build(0x14, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        temp = await client.temp_global(TempMeasureFlag.MEASURE_ONCE)
-
-        assert isinstance(temp, TempGlobal)
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_pseudo_color(self, mock_transport: MockTransport) -> None:
-        """Test get_pseudo_color."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x00"  # WHITE_HOT
-        ack_frame = Frame.build(0x1A, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        color = await client.get_pseudo_color()
-
-        assert color == PseudoColor.WHITE_HOT
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_pseudo_color(self, mock_transport: MockTransport) -> None:
-        """Test set_pseudo_color."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x03"  # IRONBOW
-        ack_frame = Frame.build(0x1B, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        new_color = await client.set_pseudo_color(PseudoColor.IRONBOW)
-
-        assert new_color == PseudoColor.IRONBOW
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_thermal_output_mode(self, mock_transport: MockTransport) -> None:
-        """Test get_thermal_output_mode."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x00"  # FPS30
-        ack_frame = Frame.build(0x33, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        mode = await client.get_thermal_output_mode()
-
-        assert mode == ThermalOutputMode.FPS30
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_thermal_output_mode(self, mock_transport: MockTransport) -> None:
-        """Test set_thermal_output_mode."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"  # FPS25_PLUS_TEMP
-        ack_frame = Frame.build(0x34, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        new_mode = await client.set_thermal_output_mode(ThermalOutputMode.FPS25_PLUS_TEMP)
-
-        assert new_mode == ThermalOutputMode.FPS25_PLUS_TEMP
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_single_temp_frame(self, mock_transport: MockTransport) -> None:
-        """Test get_single_temp_frame."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x35, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.get_single_temp_frame()
-
-        assert result is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_thermal_gain(self, mock_transport: MockTransport) -> None:
-        """Test get_thermal_gain."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x00"  # LOW
-        ack_frame = Frame.build(0x37, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        gain = await client.get_thermal_gain()
-
-        assert gain == ThermalGain.LOW
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_thermal_gain(self, mock_transport: MockTransport) -> None:
-        """Test set_thermal_gain."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"  # HIGH
-        ack_frame = Frame.build(0x38, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        new_gain = await client.set_thermal_gain(ThermalGain.HIGH)
-
-        assert new_gain == ThermalGain.HIGH
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_env_correction_params(self, mock_transport: MockTransport) -> None:
-        """Test get_env_correction_params."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (10 bytes)
-        ack_payload = b"\x00\x00" * 5
-        ack_frame = Frame.build(0x39, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        params = await client.get_env_correction_params()
-
-        assert isinstance(params, EnvCorrectionParams)
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_env_correction_params(self, mock_transport: MockTransport) -> None:
-        """Test set_env_correction_params."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x3A, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        params = EnvCorrectionParams(
-            distance_m=10.0,
-            emissivity_pct=95.0,
-            humidity_pct=50.0,
-            ambient_c=25.0,
-            reflective_c=20.0,
-        )
-
-        result = await client.set_env_correction_params(params)
-
-        assert result is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_env_correction_switch(self, mock_transport: MockTransport) -> None:
-        """Test get_env_correction_switch."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x3B, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        switch = await client.get_env_correction_switch()
-
-        assert switch is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_env_correction_switch(self, mock_transport: MockTransport) -> None:
-        """Test set_env_correction_switch."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x3C, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.set_env_correction_switch(True)
-
-        assert result is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_ir_thresh_map_state(self, mock_transport: MockTransport) -> None:
-        """Test get_ir_thresh_map_state."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x00"
-        ack_frame = Frame.build(0x42, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        state = await client.get_ir_thresh_map_state()
-
-        assert state is False
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_ir_thresh_map_state(self, mock_transport: MockTransport) -> None:
-        """Test set_ir_thresh_map_state."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x43, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.set_ir_thresh_map_state(True)
-
-        assert result is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_ir_thresh_params(self, mock_transport: MockTransport) -> None:
-        """Test get_ir_thresh_params."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (24 bytes: 3 regions * 8 bytes each)
-        ack_payload = b"\x00" * 24
-        ack_frame = Frame.build(0x44, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        params = await client.get_ir_thresh_params()
-
-        assert isinstance(params, IRThreshParams)
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_ir_thresh_params(self, mock_transport: MockTransport) -> None:
-        """Test set_ir_thresh_params."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x45, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        region = IRThreshRegion(
-            switch=1, temp_min=0, temp_max=100, color_r=255, color_g=0, color_b=0
-        )
-        params = IRThreshParams(region1=region, region2=region, region3=region)
-
-        result = await client.set_ir_thresh_params(params)
-
-        assert result is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_ir_thresh_precision(self, mock_transport: MockTransport) -> None:
-        """Test get_ir_thresh_precision."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"  # MAX
-        ack_frame = Frame.build(0x46, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        precision = await client.get_ir_thresh_precision()
-
-        assert precision == IRThreshPrecision.MAX
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_ir_thresh_precision(self, mock_transport: MockTransport) -> None:
-        """Test set_ir_thresh_precision."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x02"  # MID
-        ack_frame = Frame.build(0x47, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        new_precision = await client.set_ir_thresh_precision(IRThreshPrecision.MID)
-
-        assert new_precision == IRThreshPrecision.MID
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_manual_thermal_shutter(self, mock_transport: MockTransport) -> None:
-        """Test manual_thermal_shutter."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x4F, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.manual_thermal_shutter()
-
-        assert result is True
-
-        await client.close()
-
-
-class TestLaserCommands:
-    """Test laser ranging commands."""
-
-    @pytest.mark.asyncio
-    async def test_get_laser_distance(self, mock_transport: MockTransport) -> None:
-        """Test get_laser_distance."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (2 bytes: raw = 1000 -> 100.0m)
-        ack_payload = b"\xe8\x03"
-        ack_frame = Frame.build(CMD_REQUEST_LASER_DISTANCE, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        laser = await client.get_laser_distance()
-
-        assert isinstance(laser, LaserDistance)
-        assert laser.distance_m == 100.0
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_laser_target_latlon(self, mock_transport: MockTransport) -> None:
-        """Test get_laser_target_latlon."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK (8 bytes: lat_e7, lon_e7)
-        ack_payload = b"\x00\x00\x00\x00\x00\x00\x00\x00"
-        ack_frame = Frame.build(0x17, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        latlon = await client.get_laser_target_latlon()
-
-        assert isinstance(latlon, LaserTargetLatLon)
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_laser_ranging_state(self, mock_transport: MockTransport) -> None:
-        """Test set_laser_ranging_state."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x32, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.set_laser_ranging_state(True)
-
-        assert result is True
-
-        await client.close()
-
-
-class TestAICommands:
-    """Test AI tracking commands."""
-
-    @pytest.mark.asyncio
-    async def test_get_ai_mode(self, mock_transport: MockTransport) -> None:
-        """Test get_ai_mode."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x4D, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        mode = await client.get_ai_mode()
-
-        assert mode is True
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_get_ai_stream_status(self, mock_transport: MockTransport) -> None:
-        """Test get_ai_stream_status."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"  # STREAMING
-        ack_frame = Frame.build(0x4E, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        status = await client.get_ai_stream_status()
-
-        assert status == AIStreamStatus.STREAMING
-
-        await client.close()
-
-    @pytest.mark.asyncio
-    async def test_set_ai_stream_output(self, mock_transport: MockTransport) -> None:
-        """Test set_ai_stream_output."""
-        client = SIYIClient(mock_transport, response_matching="command")
-        await client.connect()
-
-        # Queue ACK
-        ack_payload = b"\x01"
-        ack_frame = Frame.build(0x51, ack_payload, seq=0, need_ack=False)
-        mock_transport.queue_response(ack_frame.to_bytes())
-
-        result = await client.set_ai_stream_output(True)
 
         assert result is True
 

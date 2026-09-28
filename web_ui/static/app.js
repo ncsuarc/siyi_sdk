@@ -118,6 +118,7 @@ class SiyiApp {
             const ipChanged = this.cameraIp !== info.ip;
             this.cameraIp = info.ip;
             document.getElementById('camera-ip-display').innerText = info.ip;
+            document.getElementById('stream-backend-select').value = info.backend || 'auto';
             const ipInput = document.getElementById('config-ip-input');
             if (!ipInput.value || ipChanged) ipInput.value = info.ip;
             this.isCameraConnected = info.connected;
@@ -162,7 +163,7 @@ class SiyiApp {
         document.getElementById('connection-indicator').className = connected ? 'indicator online' : 'indicator';
         document.getElementById('camera-status').innerText = label;
         for (const id of ['photo-btn', 'record-btn', 'center-btn', 'lock-btn', 'follow-btn', 'fpv-btn', 'stop-btn', 'zoom-in-btn', 'zoom-out-btn',
-            'focus-near-btn', 'focus-far-btn', 'reboot-camera-btn', 'reboot-gimbal-btn', 'format-sd-btn']) {
+            'reboot-camera-btn', 'reboot-gimbal-btn', 'format-sd-btn']) {
             document.getElementById(id).disabled = !connected;
         }
         document.getElementById('config-res-select').disabled = !connected;
@@ -225,12 +226,10 @@ class SiyiApp {
             document.getElementById(`${mode.toLowerCase()}-btn`).onclick = () => this.setGimbalMode(mode);
         }
         document.getElementById('stop-btn').onclick = async () => {
-            if (await this.stopMotion(true)) this.notify('Stop commands sent for gimbal, zoom and focus.');
+            if (await this.stopMotion(true)) this.notify('Stop commands sent for gimbal and zoom.');
         };
         this.bindHold('zoom-in-btn', 'zoom', 1);
         this.bindHold('zoom-out-btn', 'zoom', -1);
-        this.bindHold('focus-near-btn', 'focus', 1);
-        this.bindHold('focus-far-btn', 'focus', -1);
         window.addEventListener('blur', () => this.stopMotion());
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) this.stopMotion();
@@ -253,6 +252,22 @@ class SiyiApp {
         document.getElementById('config-live-view-toggle').onchange = (e) => {
             this.liveViewEnabled = e.target.checked;
             this.updateLiveView();
+        };
+        document.getElementById('stream-backend-select').onchange = async (event) => {
+            const select = event.target;
+            select.disabled = true;
+            try {
+                const response = await this.request('/api/stream/backend', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({backend: select.value})
+                });
+                this.notify(`Video backend: ${response.backend}`);
+                if (this.liveViewEnabled) this.updateLiveView();
+            } catch (error) {
+                this.notify(`Video backend failed: ${error.message}`, true);
+            } finally {
+                select.disabled = false;
+            }
         };
     }
 
@@ -339,7 +354,7 @@ class SiyiApp {
                     '/api/gimbal/rotate': 'Gimbal velocity', '/api/gimbal/center': 'Center',
                     '/api/gimbal/mode': 'Gimbal mode', '/api/camera/record': 'Recording toggle',
                     '/api/camera/photo': 'Photo', '/api/camera/zoom': 'Zoom velocity',
-                    '/api/camera/focus': 'Focus velocity', '/api/camera/encoding': 'Encoding settings'
+                    '/api/camera/encoding': 'Encoding settings'
                 };
                 let suffix = '';
                 if (url === '/api/gimbal/mode') suffix = ` · ${JSON.parse(options.body).mode}`;
@@ -455,7 +470,6 @@ class SiyiApp {
         const recordLabels = {RECORDING: 'Recording', NOT_RECORDING: 'Stopped', NO_TF_CARD: 'No SD card', DATA_LOSS: 'SD data loss'};
         document.getElementById('record-state-status').textContent = recordLabels[camera?.recording] || 'Unknown';
         document.getElementById('record-state-status').classList.toggle('recording', camera?.recording === 'RECORDING');
-        document.getElementById('hdr-status').textContent = camera ? (camera.hdr ? 'On' : 'Off') : 'Unknown';
         const freshness = document.getElementById('state-freshness');
         freshness.textContent = fresh ? `Camera · ${(data.status_age_ms / 1000).toFixed(1)}s ago` : 'Unconfirmed / stale';
         freshness.title = data?.status_error || 'Active modes are read back from the camera.';
@@ -574,7 +588,6 @@ class SiyiApp {
         if (force && this.isCameraConnected) {
             this.queueMotion('rotate', {yaw: 0, pitch: 0});
             this.queueMotion('zoom', 0);
-            this.queueMotion('focus', 0);
         }
         const results = await Promise.all([...this.motionQueues.values()].map(queue => queue.flight));
         return results.every(result => result !== false);
@@ -677,6 +690,7 @@ class SiyiApp {
                 if (pitchEl) pitchEl.innerText = freshAttitude ? data.pitch.toFixed(1) : '—';
                 if (rollEl) rollEl.innerText = freshAttitude ? data.roll.toFixed(1) : '—';
                 this.renderCameraState(data);
+                window.dispatchEvent(new CustomEvent('siyi-telemetry', {detail: data}));
             } catch (e) {
                 console.error("WS Message Error", e);
             }

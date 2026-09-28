@@ -4,12 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GStreamer low-latency RTSP streaming example for old-generation cameras.
+"""GStreamer RTSP streaming example for the A8 Mini.
 
 Demonstrates the GStreamer backend which provides hardware-accelerated H.264
 decoding and the lowest end-to-end latency among available backends.
 
-Target cameras: ZR30, ZR10, A8 Mini, A2 Mini, R1M (old-gen, H.264 stream).
+Target camera: A8 Mini (H.264 stream).
 Stream URL: rtsp://192.168.144.25:8554/main.264
 
 GStreamer pipeline used internally (desktop):
@@ -43,7 +43,6 @@ import time
 os.environ.setdefault("QT_NO_GLIB", "1")
 
 from siyi_sdk import (
-    CameraGeneration,
     SIYIStream,
     StreamBackend,
     StreamConfig,
@@ -60,7 +59,7 @@ def main() -> None:
         print("opencv-python is required. Install with: pip install opencv-python")
         return
 
-    rtsp_url = build_rtsp_url(generation=CameraGeneration.OLD, stream="main")
+    rtsp_url = build_rtsp_url()
     print(f"GStreamer backend connecting to: {rtsp_url}")
 
     config = StreamConfig(

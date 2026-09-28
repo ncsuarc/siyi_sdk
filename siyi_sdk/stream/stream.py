@@ -38,7 +38,7 @@ class SIYIStream:
     transparently. Thread-safe for callback registration.
 
     Example:
-        stream = SIYIStream(StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1"))
+        stream = SIYIStream(StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264"))
 
         @stream.on_frame
         async def handle(frame: StreamFrame) -> None:

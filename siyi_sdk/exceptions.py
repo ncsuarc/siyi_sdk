@@ -13,12 +13,6 @@ organized in a hierarchical structure for granular error handling.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .models import ProductID
-
-
 # =============================================================================
 # Base Exception
 # =============================================================================
@@ -203,24 +197,6 @@ class ResponseError(CommandError):
     def __str__(self) -> str:
         """Return human-readable error message."""
         return f"Command 0x{self.cmd_id:02X} failed with status={self.sta}"
-
-
-@dataclass
-class UnsupportedByProductError(CommandError):
-    """Command not supported by the connected product.
-
-    Attributes:
-        cmd_id: Command ID that is not supported.
-        product: Product that does not support the command.
-
-    """
-
-    cmd_id: int
-    product: ProductID
-
-    def __str__(self) -> str:
-        """Return human-readable error message."""
-        return f"Command 0x{self.cmd_id:02X} is not supported by {self.product.name}"
 
 
 # =============================================================================

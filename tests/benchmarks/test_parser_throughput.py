@@ -166,7 +166,7 @@ class TestParserThroughput:
         rng = random.Random(2026)
         # Create a frame with large payload (4KB = max allowed by parser default)
         large_payload = bytes([rng.randint(0, 255) for _ in range(4 * 1024)])
-        frame = Frame(ctrl=1, seq=0, cmd_id=0x35, data=large_payload)  # 0x35 = thermal frame
+        frame = Frame(ctrl=1, seq=0, cmd_id=0x20, data=large_payload)  # encoding response
         wire = frame.to_bytes()
 
         parser = FrameParser()

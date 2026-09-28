@@ -23,7 +23,7 @@ from siyi_sdk.stream.models import StreamConfig  # noqa: E402
 
 @pytest.fixture
 def config() -> StreamConfig:
-    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1")
+    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264")
 
 
 class TestAiortspBackendInit:
@@ -42,7 +42,7 @@ class TestAiortspBackendInit:
 class TestAiortspBackendUrl:
     def test_rtsp_url_stored_in_config(self, config: StreamConfig) -> None:
         backend = AiortspBackend(config)
-        assert backend._config.rtsp_url == "rtsp://192.168.144.25:8554/video1"
+        assert backend._config.rtsp_url == "rtsp://192.168.144.25:8554/main.264"
 
     async def test_connect_sets_connected(self, config: StreamConfig) -> None:
         backend = AiortspBackend(config)

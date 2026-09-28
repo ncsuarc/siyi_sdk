@@ -12,7 +12,7 @@ import time
 import math
 from collections import deque
 from ipaddress import IPv4Address
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Any
 from contextlib import asynccontextmanager
 
 import cv2
@@ -29,7 +29,6 @@ from siyi_sdk import (
     StreamConfig,
     StreamBackend,
     MediaType,
-    CameraGeneration,
     build_rtsp_url,
     configure_logging,
 )
@@ -44,6 +43,7 @@ from siyi_sdk.models import (
     FirmwareVersion,
     HardwareID
 )
+from web_ui.command_explorer import COMMANDS, execute
 
 # Setup logging
 configure_logging(level="INFO")
@@ -60,11 +60,13 @@ class CameraState:
         self.client: Optional[SIYIClient] = None
         self.media: Optional[MediaClient] = None
         self.stream: Optional[SIYIStream] = None
+        self.stream_backend = StreamBackend.AUTO
         self.latest_frame: Optional[bytes] = None
         self.last_frame_time = 0.0
         self.stream_error: Optional[str] = None
         self.frame_event = asyncio.Event()
         self.attitude = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
+        self.feedback = deque(maxlen=20)
         self.lock = asyncio.Lock()
         self.is_connected = False
         self.watchdog_task: Optional[asyncio.Task] = None
@@ -96,6 +98,7 @@ class CameraState:
             
             # Reset state for new initialization
             self.stop_event.clear()
+            self.feedback.clear()
             self.ip = ip
             self.is_connected = False
             
@@ -103,6 +106,7 @@ class CameraState:
             transport = UDPTransport(ip)
             self.client = SIYIClient(transport)
             self.client.on_attitude(self._on_attitude)
+            self.client.on_function_feedback(self._on_feedback)
             # Status uses its own command ID lock, with one attempt per query;
             # keep the same UDP socket used by telemetry and motion control.
             self.status_task = asyncio.create_task(self.poll_status())
@@ -110,12 +114,12 @@ class CameraState:
             self.media = MediaClient(ip)
             
             # Initialize Video Stream
-            rtsp_url = build_rtsp_url(host=ip, generation=CameraGeneration.OLD, stream="main")
+            rtsp_url = build_rtsp_url(host=ip)
             config = StreamConfig(
                 rtsp_url=rtsp_url,
-                backend=StreamBackend.AUTO,
+                backend=self.stream_backend,
                 latency_ms=100,
-                codec="h265",
+                codec="h264",
             )
             self.stream = SIYIStream(config)
             self.stream.on_frame(self._on_frame)
@@ -189,6 +193,9 @@ class CameraState:
             "pitch": att.pitch_deg,
             "roll": att.roll_deg
         }
+
+    def _on_feedback(self, feedback):
+        self.feedback.append({"event": feedback.name, "time": time.time()})
 
     async def _on_frame(self, frame):
         # Encode to JPEG for MJPEG stream
@@ -312,8 +319,7 @@ class CameraState:
             if kind == "rotate":
                 await self.client.rotate_nowait(*value)
             else:
-                method = self.client.manual_zoom_nowait if kind == "zoom" else self.client.manual_focus_nowait
-                await method(value)
+                await self.client.manual_zoom_nowait(value)
         if moving:
             self.motion_deadlines[kind] = time.monotonic() + 0.4
         else:
@@ -456,6 +462,13 @@ class EncodingRequest(BaseModel):
     resolution: Optional[str] = None
     bitrate_kbps: Optional[int] = None
 
+class CommandRequest(BaseModel):
+    args: dict[str, Any] = Field(default_factory=dict)
+    confirm: bool = False
+
+class BackendRequest(BaseModel):
+    backend: StreamBackend
+
 # Endpoints
 @app.post("/api/config/ip")
 async def set_ip(req: IPConfigRequest):
@@ -471,6 +484,7 @@ async def set_ip(req: IPConfigRequest):
 async def get_ip():
     return {
         "ip": GLOBAL_CONFIG["camera_ip"],
+        "backend": state.stream_backend.value,
         "connected": state.is_connected,
         "connection_error": state.connection_error,
         "stream_ready": state.is_connected and state.live_enabled and time.monotonic() - state.last_frame_time < 5.0,
@@ -571,21 +585,6 @@ async def zoom(direction: int): # -1, 0, 1
         if direction not in (-1, 0, 1):
             raise HTTPException(status_code=422, detail="Direction must be -1, 0 or 1")
         await state.send_motion("zoom", direction)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
-
-@app.post("/api/camera/focus")
-async def focus(direction: int): # -1, 0, 1
-    if not state.client:
-        raise HTTPException(status_code=503, detail="Camera not connected")
-    try:
-        started = time.perf_counter()
-        if direction not in (-1, 0, 1):
-            raise HTTPException(status_code=422, detail="Direction must be -1, 0 or 1")
-        await state.send_motion("focus", direction)
     except HTTPException:
         raise
     except Exception as e:
@@ -754,12 +753,57 @@ async def toggle_stream(enabled: bool):
         logger.error(f"Toggle stream failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/stream/backend")
+async def set_stream_backend(request: BackendRequest):
+    async with state.lock:
+        state.stream_backend = request.backend
+        if state.stream:
+            was_running = state.stream.is_running
+            if was_running:
+                await state.stream.stop()
+            state.stream._config.backend = request.backend
+            if was_running and state.live_enabled and state.is_connected:
+                try:
+                    await state.stream.start()
+                    state.stream_error = None
+                except Exception as exc:
+                    state.stream_error = str(exc) or "Video backend unavailable"
+                    raise HTTPException(status_code=503, detail=state.stream_error) from exc
+    return {"backend": request.backend.value}
+
+@app.get("/api/sdk/commands")
+async def list_sdk_commands():
+    return [command.describe() for command in COMMANDS.values()]
+
+@app.post("/api/sdk/commands/{name}")
+async def run_sdk_command(name: str, request: CommandRequest):
+    command = COMMANDS.get(name)
+    if command is None:
+        raise HTTPException(status_code=404, detail="Unknown A8 Mini command")
+    if not state.client or not state.is_connected:
+        raise HTTPException(status_code=503, detail="Camera not connected")
+    if command.confirmation and not request.confirm:
+        raise HTTPException(status_code=409, detail="Confirmation required")
+    if name == "heartbeat" and not state.client._transport.supports_heartbeat:
+        raise HTTPException(status_code=422, detail="Heartbeat is only used on TCP connections")
+    try:
+        result = await execute(state.client, command, request.args)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if name == "set_ip_config":
+        ip = str(request.args["cfg"]["ip"])
+        GLOBAL_CONFIG["camera_ip"] = ip
+        await state.initialize(ip)
+    return {"command": name, "result": result}
+
 @app.websocket("/ws/attitude")
 async def websocket_attitude(websocket: WebSocket):
     await websocket.accept()
     try:
         while not state.stop_event.is_set():
-            await websocket.send_json({**state.attitude, **state.status_snapshot()})
+            await websocket.send_json({**state.attitude, **state.status_snapshot(), "feedback": list(state.feedback)})
             await asyncio.sleep(0.1) # 10Hz
     except WebSocketDisconnect:
         pass

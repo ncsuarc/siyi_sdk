@@ -9,7 +9,7 @@
 This module provides fixtures for:
 - Event loop configuration
 - Mock transport and connected client instances
-- Sample Frame fixtures for every CMD_ID in the protocol
+- Sample Frame fixtures for retained A8 Mini commands
 - Reusable test data for integration and unit tests
 """
 
@@ -25,56 +25,34 @@ import pytest_asyncio
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.constants import (
     CMD_ABSOLUTE_ZOOM_AUTO_FOCUS,
-    CMD_AI_TRACK_STREAM,
-    CMD_AUTO_FOCUS,
     CMD_FUNCTION_FEEDBACK,
-    CMD_GET_AI_TRACK_STREAM_STA,
     CMD_GET_IP,
     CMD_GET_MAVLINK_OSD_FLAG,
     CMD_GET_PIC_NAME_TYPE,
     CMD_GIMBAL_ROTATION,
-    CMD_MANUAL_FOCUS,
-    CMD_MANUAL_ZOOM_AUTO_FOCUS,
     CMD_ONE_KEY_CENTERING,
     CMD_REQUEST_CAMERA_SYSTEM_INFO,
     CMD_REQUEST_CONTROL_MODE,
     CMD_REQUEST_ENCODING_PARAMS,
-    CMD_REQUEST_ENV_CORRECTION_PARAMS,
-    CMD_REQUEST_ENV_CORRECTION_SWITCH,
     CMD_REQUEST_FIRMWARE_VERSION,
     CMD_REQUEST_GIMBAL_ATTITUDE,
     CMD_REQUEST_GIMBAL_DATA_STREAM,
     CMD_REQUEST_GIMBAL_MODE,
     CMD_REQUEST_GIMBAL_SYSTEM_INFO,
-    CMD_REQUEST_HARDWARE_ID,
-    CMD_REQUEST_LASER_DISTANCE,
-    CMD_REQUEST_LASER_LATLON,
     CMD_REQUEST_MAGNETIC_ENCODER,
     CMD_REQUEST_MOTOR_VOLTAGE,
-    CMD_REQUEST_PSEUDO_COLOR,
     CMD_REQUEST_SYSTEM_TIME,
-    CMD_REQUEST_THERMAL_GAIN,
-    CMD_REQUEST_THERMAL_OUTPUT_MODE,
-    CMD_REQUEST_VIDEO_STITCHING_MODE,
     CMD_REQUEST_WEAK_CONTROL_MODE,
     CMD_REQUEST_WEAK_THRESHOLD,
     CMD_REQUEST_ZOOM_MAGNIFICATION,
     CMD_REQUEST_ZOOM_RANGE,
     CMD_SD_FORMAT,
-    CMD_SET_AI_TRACK_STREAM_STA,
     CMD_SET_ENCODING_PARAMS,
-    CMD_SET_ENV_CORRECTION_PARAMS,
-    CMD_SET_ENV_CORRECTION_SWITCH,
     CMD_SET_GIMBAL_ATTITUDE,
     CMD_SET_IP,
-    CMD_SET_LASER_RANGING_STATE,
     CMD_SET_MAVLINK_OSD_FLAG,
     CMD_SET_PIC_NAME_TYPE,
-    CMD_SET_PSEUDO_COLOR,
-    CMD_SET_THERMAL_GAIN,
-    CMD_SET_THERMAL_OUTPUT_MODE,
     CMD_SET_UTC_TIME,
-    CMD_SET_VIDEO_STITCHING_MODE,
     CMD_SET_WEAK_CONTROL_MODE,
     CMD_SET_WEAK_THRESHOLD,
     CMD_SINGLE_AXIS_ATTITUDE,
@@ -150,36 +128,6 @@ def frame_firmware_version_ack() -> bytes:
 
 
 @pytest.fixture
-def frame_hardware_id_ack() -> bytes:
-    """Hardware ID ACK frame (0x02) — ZR10 example."""
-    payload = b"6b\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a"
-    return Frame(ctrl=CTRL_ACK_PACK, seq=2, cmd_id=CMD_REQUEST_HARDWARE_ID, data=payload).to_bytes()
-
-
-@pytest.fixture
-def frame_auto_focus_ack() -> bytes:
-    """Auto focus ACK frame (0x04) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(ctrl=CTRL_ACK_PACK, seq=3, cmd_id=CMD_AUTO_FOCUS, data=payload).to_bytes()
-
-
-@pytest.fixture
-def frame_manual_zoom_auto_focus_ack() -> bytes:
-    """Manual zoom + auto focus ACK frame (0x05) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=4, cmd_id=CMD_MANUAL_ZOOM_AUTO_FOCUS, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_manual_focus_ack() -> bytes:
-    """Manual focus ACK frame (0x06) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(ctrl=CTRL_ACK_PACK, seq=5, cmd_id=CMD_MANUAL_FOCUS, data=payload).to_bytes()
-
-
-@pytest.fixture
 def frame_gimbal_rotation_ack() -> bytes:
     """Gimbal rotation ACK frame (0x07) with sta=1."""
     payload = struct.pack("<B", 1)
@@ -239,48 +187,10 @@ def frame_absolute_zoom_ack() -> bytes:
 
 
 @pytest.fixture
-def frame_video_stitching_mode_ack() -> bytes:
-    """Video stitching mode ACK frame (0x10) — mode=3."""
-    payload = struct.pack("<B", 3)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=13, cmd_id=CMD_REQUEST_VIDEO_STITCHING_MODE, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_set_video_stitching_mode_ack() -> bytes:
-    """Set video stitching mode ACK frame (0x11) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=14, cmd_id=CMD_SET_VIDEO_STITCHING_MODE, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_laser_distance_ack() -> bytes:
-    """Laser distance ACK frame (0x15) — 123.4 meters."""
-    payload = struct.pack("<H", 1234)  # decimeters
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=15, cmd_id=CMD_REQUEST_LASER_DISTANCE, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
 def frame_zoom_range_ack() -> bytes:
     """Zoom range ACK frame (0x16) — max_zoom_factor=30."""
     payload = struct.pack("<H", 300)  # 30.0x in tenths
     return Frame(ctrl=CTRL_ACK_PACK, seq=16, cmd_id=CMD_REQUEST_ZOOM_RANGE, data=payload).to_bytes()
-
-
-@pytest.fixture
-def frame_laser_latlon_ack() -> bytes:
-    """Laser target lat/lon ACK frame (0x17)."""
-    payload = struct.pack(
-        "<iiii", 400000000, -1200000000, 500, 1000
-    )  # lat, lon, alt, rel_alt in mm
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=17, cmd_id=CMD_REQUEST_LASER_LATLON, data=payload
-    ).to_bytes()
 
 
 @pytest.fixture
@@ -301,20 +211,8 @@ def frame_gimbal_mode_ack() -> bytes:
     ).to_bytes()
 
 
-@pytest.fixture
-def frame_pseudo_color_ack() -> bytes:
-    """Pseudo color ACK frame (0x1A) — RAINBOW."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=20, cmd_id=CMD_REQUEST_PSEUDO_COLOR, data=payload
-    ).to_bytes()
 
 
-@pytest.fixture
-def frame_set_pseudo_color_ack() -> bytes:
-    """Set pseudo color ACK frame (0x1B) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(ctrl=CTRL_ACK_PACK, seq=21, cmd_id=CMD_SET_PSEUDO_COLOR, data=payload).to_bytes()
 
 
 @pytest.fixture
@@ -404,84 +302,12 @@ def frame_gimbal_system_info_ack() -> bytes:
     ).to_bytes()
 
 
-@pytest.fixture
-def frame_set_laser_ranging_state_ack() -> bytes:
-    """Set laser ranging state ACK frame (0x32) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=32, cmd_id=CMD_SET_LASER_RANGING_STATE, data=payload
-    ).to_bytes()
 
 
-@pytest.fixture
-def frame_thermal_output_mode_ack() -> bytes:
-    """Thermal output mode ACK frame (0x33) — PIP mode."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=33, cmd_id=CMD_REQUEST_THERMAL_OUTPUT_MODE, data=payload
-    ).to_bytes()
 
 
-@pytest.fixture
-def frame_set_thermal_output_mode_ack() -> bytes:
-    """Set thermal output mode ACK frame (0x34) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=34, cmd_id=CMD_SET_THERMAL_OUTPUT_MODE, data=payload
-    ).to_bytes()
 
 
-@pytest.fixture
-def frame_thermal_gain_ack() -> bytes:
-    """Thermal gain ACK frame (0x37) — HIGH gain."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=35, cmd_id=CMD_REQUEST_THERMAL_GAIN, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_set_thermal_gain_ack() -> bytes:
-    """Set thermal gain ACK frame (0x38) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(ctrl=CTRL_ACK_PACK, seq=36, cmd_id=CMD_SET_THERMAL_GAIN, data=payload).to_bytes()
-
-
-@pytest.fixture
-def frame_env_correction_params_ack() -> bytes:
-    """Environment correction params ACK frame (0x39)."""
-    # distance=100m, emissivity=95%, atmospheric_temp=25.0C, scene_temp=30.0C, humidity=60%
-    payload = struct.pack("<HBhhB", 100, 95, 250, 300, 60)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=37, cmd_id=CMD_REQUEST_ENV_CORRECTION_PARAMS, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_set_env_correction_params_ack() -> bytes:
-    """Set environment correction params ACK frame (0x3A) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=38, cmd_id=CMD_SET_ENV_CORRECTION_PARAMS, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_env_correction_switch_ack() -> bytes:
-    """Environment correction switch ACK frame (0x3B) — enabled."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=39, cmd_id=CMD_REQUEST_ENV_CORRECTION_SWITCH, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_set_env_correction_switch_ack() -> bytes:
-    """Set environment correction switch ACK frame (0x3C) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=40, cmd_id=CMD_SET_ENV_CORRECTION_SWITCH, data=payload
-    ).to_bytes()
 
 
 @pytest.fixture
@@ -538,32 +364,6 @@ def frame_set_mavlink_osd_flag_ack() -> bytes:
     payload = struct.pack("<B", 1)
     return Frame(
         ctrl=CTRL_ACK_PACK, seq=47, cmd_id=CMD_SET_MAVLINK_OSD_FLAG, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_ai_track_stream_push() -> bytes:
-    """AI track stream push frame (0x50)."""
-    # target_type, x, y, w, h, reserved
-    payload = struct.pack("<HHHHH", 1, 640, 360, 200, 150)
-    return Frame(ctrl=CTRL_NEED_ACK, seq=48, cmd_id=CMD_AI_TRACK_STREAM, data=payload).to_bytes()
-
-
-@pytest.fixture
-def frame_ai_track_stream_sta_ack() -> bytes:
-    """AI track stream status ACK frame (0x4E) — enabled."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=49, cmd_id=CMD_GET_AI_TRACK_STREAM_STA, data=payload
-    ).to_bytes()
-
-
-@pytest.fixture
-def frame_set_ai_track_stream_sta_ack() -> bytes:
-    """Set AI track stream status ACK frame (0x51) with sta=1."""
-    payload = struct.pack("<B", 1)
-    return Frame(
-        ctrl=CTRL_ACK_PACK, seq=50, cmd_id=CMD_SET_AI_TRACK_STREAM_STA, data=payload
     ).to_bytes()
 
 

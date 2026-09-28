@@ -4,7 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Read encoding parameters for all streams and update the main stream to 720p."""
+"""Read A8 Mini encoding parameters and set the main stream to 720p."""
 
 import asyncio
 
@@ -24,7 +24,7 @@ async def main() -> None:
                 f"  {p.frame_rate} fps"
             )
 
-        # update main stream: keep existing codec, switch to 720p 4 Mbps 30 fps
+        # Keep the camera's supported codec and frame rate.
         current = await client.get_encoding_params(StreamType.MAIN)
         new_params = EncodingParams(
             stream_type=StreamType.MAIN,
@@ -32,7 +32,7 @@ async def main() -> None:
             resolution_w=1280,
             resolution_h=720,
             bitrate_kbps=4000,
-            frame_rate=30,
+            frame_rate=current.frame_rate,
         )
         ok = await client.set_encoding_params(new_params)
         print(f"\nmain stream updated: {ok}")

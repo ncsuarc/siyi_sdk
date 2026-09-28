@@ -14,7 +14,7 @@ video stream. Both communication channels operate concurrently:
 The script subscribes to the attitude push stream and prints the gimbal
 attitude alongside the current video FPS every second.
 
-Target cameras: ZT30, ZT6 (new-gen) at 192.168.144.25.
+Target camera: A8 Mini at 192.168.144.25.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import asyncio
 import threading
 
 from siyi_sdk import (
-    CameraGeneration,
     SIYIClient,
     StreamFrame,
     configure_logging,
@@ -44,10 +43,7 @@ async def main() -> None:
 
     client: SIYIClient = await connect_udp("192.168.144.25", 37260)
 
-    stream = client.create_stream(
-        stream="main",
-        generation=CameraGeneration.NEW,
-    )
+    stream = client.create_stream()
 
     frame_count = 0
     latest: list[StreamFrame | None] = [None]

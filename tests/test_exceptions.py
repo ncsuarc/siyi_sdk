@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from siyi_sdk import exceptions
-from siyi_sdk.models import ProductID
 
 
 class TestExceptionHierarchy:
@@ -40,7 +39,6 @@ class TestExceptionHierarchy:
         """Command error subclasses should inherit from CommandError."""
         assert issubclass(exceptions.NACKError, exceptions.CommandError)
         assert issubclass(exceptions.ResponseError, exceptions.CommandError)
-        assert issubclass(exceptions.UnsupportedByProductError, exceptions.CommandError)
 
 
 class TestCRCError:
@@ -204,31 +202,6 @@ class TestNACKError:
         assert error.cmd_id == 0x01
         assert error.error_code == 1
         assert error.message == "failed"
-
-
-class TestUnsupportedByProductError:
-    """Test UnsupportedByProductError exception."""
-
-    def test_isinstance_command_error(self):
-        """UnsupportedByProductError should be an instance of CommandError."""
-        error = exceptions.UnsupportedByProductError(cmd_id=0x15, product=ProductID.A2_MINI)
-        assert isinstance(error, exceptions.CommandError)
-
-    def test_str_contains_cmd_id(self):
-        """UnsupportedByProductError str should contain command ID."""
-        error = exceptions.UnsupportedByProductError(cmd_id=0x15, product=ProductID.A2_MINI)
-        assert "0x15" in str(error)
-
-    def test_str_contains_product_name(self):
-        """UnsupportedByProductError str should contain product name."""
-        error = exceptions.UnsupportedByProductError(cmd_id=0x15, product=ProductID.A2_MINI)
-        assert "A2_MINI" in str(error)
-
-    def test_field_preservation(self):
-        """UnsupportedByProductError fields should be preserved."""
-        error = exceptions.UnsupportedByProductError(cmd_id=0x15, product=ProductID.A2_MINI)
-        assert error.cmd_id == 0x15
-        assert error.product == ProductID.A2_MINI
 
 
 class TestSimpleExceptions:

@@ -4,19 +4,21 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Read spot temperature at pixel (640, 360) on thermal sensor."""
+"""Connect to an A8 Mini over UDP and read firmware and attitude."""
 
 import asyncio
 
 from siyi_sdk import configure_logging, connect_udp
-from siyi_sdk.models import TempMeasureFlag
 
 
 async def main() -> None:
-    """Query spot temperature at given pixel coordinates."""
+    """Connect and display firmware version and gimbal attitude."""
     async with await connect_udp("192.168.144.25", 37260) as client:
-        tp = await client.temp_at_point(640, 360, TempMeasureFlag.MEASURE_ONCE)
-        print(f"temperature at ({tp.x},{tp.y}) = {tp.temperature_c:.2f}°C")
+        fw = await client.get_firmware_version()
+        print(f"Camera={fw.camera} Gimbal={fw.gimbal} Zoom={fw.zoom}")
+
+        att = await client.get_gimbal_attitude()
+        print(f"yaw={att.yaw_deg:.1f} pitch={att.pitch_deg:.1f} roll={att.roll_deg:.1f}")
 
 
 if __name__ == "__main__":

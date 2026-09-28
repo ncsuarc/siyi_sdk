@@ -96,8 +96,8 @@ class TestFCStream:
 
 class TestGimbalStream:
     def test_encode(self):
-        payload = encode_gimbal_stream(GimbalDataType.LASER_RANGE, DataStreamFreq.OFF)
-        assert payload == b"\x02\x00"
+        payload = encode_gimbal_stream(GimbalDataType.MAGNETIC_ENCODER, DataStreamFreq.OFF)
+        assert payload == b"\x03\x00"
 
     def test_decode_ack(self):
         result = decode_gimbal_stream_ack(b"\x03")

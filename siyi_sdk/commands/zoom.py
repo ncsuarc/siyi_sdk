@@ -7,7 +7,7 @@
 """Zoom command encoders and decoders (0x05, 0x0F, 0x16, 0x18).
 
 This module implements encoding/decoding for zoom control commands including:
-- Manual zoom with auto focus
+- Manual digital zoom
 - Absolute zoom
 - Zoom range query
 - Current zoom query

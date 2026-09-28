@@ -4,13 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Record 30 seconds of RTSP video from a new-gen camera to output.mp4.
+"""Record 30 seconds of A8 Mini RTSP video to output.mp4.
 
 Demonstrates using cv2.VideoWriter to save a SIYI RTSP stream to an MP4
 file. Progress is printed every second.
 
-Target cameras: ZT30, ZT6 (and later new-gen models).
-Stream URL: rtsp://192.168.144.25:8554/video1
+Target camera: A8 Mini.
+Stream URL: rtsp://192.168.144.25:8554/main.264
 Output file: output.mp4
 """
 
@@ -20,7 +20,6 @@ import asyncio
 import time
 
 from siyi_sdk import (
-    CameraGeneration,
     SIYIStream,
     StreamBackend,
     StreamConfig,
@@ -40,7 +39,7 @@ async def main() -> None:
         print("opencv-python is required. Install with: pip install opencv-python")
         return
 
-    rtsp_url = build_rtsp_url(generation=CameraGeneration.NEW, stream="main")
+    rtsp_url = build_rtsp_url()
     print(f"Connecting to: {rtsp_url}")
 
     config = StreamConfig(rtsp_url=rtsp_url, backend=StreamBackend.OPENCV)

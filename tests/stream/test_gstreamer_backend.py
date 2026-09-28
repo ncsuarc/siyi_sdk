@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(not _GST_AVAILABLE, reason="Gst/GstVideo unavail
 
 @pytest.fixture
 def config() -> StreamConfig:
-    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/video1", latency_ms=200)
+    return StreamConfig(rtsp_url="rtsp://192.168.144.25:8554/main.264", latency_ms=200)
 
 
 class TestGStreamerBackendInit:

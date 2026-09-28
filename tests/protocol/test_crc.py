@@ -160,7 +160,6 @@ class TestCRC16ChapterExamples:
             ("zoom +1", "55 66 01 01 00 00 00 05 01 8d 64"),
             ("zoom -1", "55 66 01 01 00 00 00 05 FF 5c 6a"),
             ("absolute zoom 4.5x", "55 66 01 02 00 01 00 0F 04 05 60 bb"),
-            ("focus +1", "55 66 01 01 00 00 00 06 01 de 31"),
             ("take photo", "55 66 01 01 00 00 00 0c 00 34 ce"),
             ("start video recording", "55 66 01 01 00 00 00 0c 02 76 ee"),
             ("pan/tilt 100,100", "55 66 01 02 00 00 00 07 64 64 3d cf"),

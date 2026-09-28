@@ -14,8 +14,6 @@ via RTSP. Three backends are supported: OpenCV (default fallback), GStreamer
 from __future__ import annotations
 
 from .models import (
-    CAMERA_GENERATION_MAP,
-    CameraGeneration,
     StreamBackend,
     StreamConfig,
     StreamFrame,
@@ -25,8 +23,6 @@ from .models import (
 from .stream import SIYIStream
 
 __all__ = [
-    "CAMERA_GENERATION_MAP",
-    "CameraGeneration",
     "SIYIStream",
     "StreamBackend",
     "StreamConfig",

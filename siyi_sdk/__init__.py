@@ -19,8 +19,6 @@ from siyi_sdk.models import MediaDirectory, MediaFile, MediaType
 
 _STREAM_EXPORTS = frozenset(
     {
-        "CAMERA_GENERATION_MAP",
-        "CameraGeneration",
         "SIYIStream",
         "StreamBackend",
         "StreamConfig",
@@ -42,8 +40,6 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - dynamic lazy re-exports
 
 __version__ = "0.6.0"
 __all__ = [
-    "CAMERA_GENERATION_MAP",
-    "CameraGeneration",
     "MediaClient",
     "MediaDirectory",
     "MediaFile",

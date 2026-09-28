@@ -10,7 +10,7 @@ This module provides the SIYIClient class, which manages the full lifecycle
 of communication with SIYI gimbal cameras including:
 - Connection management and auto-reconnect
 - Request-response with timeout and retry logic
-- Stream subscriptions for pushed data (attitude, laser, etc.)
+- Stream subscriptions for pushed attitude and camera feedback
 - Automatic heartbeat for TCP transports
 - Per-command concurrency control
 """
@@ -18,7 +18,6 @@ of communication with SIYI gimbal cameras including:
 from __future__ import annotations
 
 import asyncio
-import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
@@ -26,16 +25,13 @@ import structlog
 
 from siyi_sdk import commands
 from siyi_sdk.constants import (
-    CMD_AI_TRACK_STREAM,
     CMD_CAPTURE_PHOTO_RECORD_VIDEO,
     CMD_FUNCTION_FEEDBACK,
     CMD_REQUEST_GIMBAL_ATTITUDE,
-    CMD_REQUEST_LASER_DISTANCE,
     CMD_REQUEST_MAGNETIC_ENCODER,
     CMD_REQUEST_MOTOR_VOLTAGE,
     CMD_SEND_AIRCRAFT_ATTITUDE,
     CMD_SEND_RAW_GPS,
-    CMD_SEND_RC_CHANNELS,
     HEARTBEAT_FRAME,
 )
 from siyi_sdk.exceptions import (
@@ -45,15 +41,12 @@ from siyi_sdk.exceptions import (
 )
 from siyi_sdk.models import (
     AircraftAttitude,
-    AIStreamStatus,
-    AITrackingTarget,
     CameraSystemInfo,
     CaptureFuncType,
     CenteringAction,
     ControlMode,
     DataStreamFreq,
     EncodingParams,
-    EnvCorrectionParams,
     FCDataType,
     FileNameType,
     FileType,
@@ -65,25 +58,12 @@ from siyi_sdk.models import (
     GimbalSystemInfo,
     HardwareID,
     IPConfig,
-    IRThreshParams,
-    IRThreshPrecision,
-    LaserDistance,
-    LaserTargetLatLon,
     MagneticEncoderAngles,
     MotorVoltage,
-    PseudoColor,
     RawGPS,
-    RCChannels,
     SetAttitudeAck,
     StreamType,
     SystemTime,
-    TempGlobal,
-    TempMeasureFlag,
-    TempPoint,
-    TempRegion,
-    ThermalGain,
-    ThermalOutputMode,
-    VideoStitchingMode,
     WeakControlThreshold,
     ZoomRange,
 )
@@ -103,7 +83,6 @@ _FIRE_AND_FORGET: Final[frozenset[int]] = frozenset(
     {
         CMD_CAPTURE_PHOTO_RECORD_VIDEO,
         CMD_SEND_AIRCRAFT_ATTITUDE,
-        CMD_SEND_RC_CHANNELS,
         CMD_SEND_RAW_GPS,
     }
 )
@@ -117,32 +96,19 @@ _IDEMPOTENT_READS: Final[frozenset[int]] = frozenset(
         0x08,  # ONE_KEY_CENTERING (idempotent: centering twice = centering once)
         0x0D,  # REQUEST_GIMBAL_ATTITUDE
         0x0E,  # SET_ATTITUDE (idempotent: re-sending same target angle is safe)
-        0x10,  # REQUEST_VIDEO_STITCHING_MODE
-        0x15,  # REQUEST_LASER_DISTANCE
         0x16,  # REQUEST_ZOOM_RANGE
-        0x17,  # REQUEST_LASER_LATLON
         0x18,  # REQUEST_ZOOM_MAGNIFICATION
         0x19,  # REQUEST_GIMBAL_MODE
-        0x1A,  # REQUEST_PSEUDO_COLOR
         0x20,  # REQUEST_ENCODING_PARAMS
         0x26,  # REQUEST_MAGNETIC_ENCODER
         0x27,  # REQUEST_CONTROL_MODE
         0x28,  # REQUEST_WEAK_THRESHOLD
         0x2A,  # REQUEST_MOTOR_VOLTAGE
         0x31,  # REQUEST_GIMBAL_SYSTEM_INFO
-        0x33,  # REQUEST_THERMAL_OUTPUT_MODE
-        0x37,  # REQUEST_THERMAL_GAIN
-        0x39,  # REQUEST_ENV_CORRECTION_PARAMS
-        0x3B,  # REQUEST_ENV_CORRECTION_SWITCH
         0x40,  # REQUEST_SYSTEM_TIME
         0x41,  # SET_SINGLE_AXIS (idempotent: same target angle)
-        0x42,  # GET_IR_THRESH_MAP_STA
-        0x44,  # GET_IR_THRESH_PARAM
-        0x46,  # GET_IR_THRESH_PRECISION
         0x49,  # GET_PIC_NAME_TYPE
         0x4B,  # GET_MAVLINK_OSD_FLAG
-        0x4D,  # GET_AI_MODE_STA
-        0x4E,  # GET_AI_TRACK_STREAM_STA
         0x70,  # REQUEST_WEAK_CONTROL_MODE
         0x81,  # GET_IP
     }
@@ -153,10 +119,8 @@ _STREAM_PUSH_CMDS: Final[frozenset[int]] = frozenset(
     {
         CMD_REQUEST_GIMBAL_ATTITUDE,  # 0x0D
         CMD_FUNCTION_FEEDBACK,  # 0x0B
-        CMD_REQUEST_LASER_DISTANCE,  # 0x15
         CMD_REQUEST_MAGNETIC_ENCODER,  # 0x26
         CMD_REQUEST_MOTOR_VOLTAGE,  # 0x2A
-        CMD_AI_TRACK_STREAM,  # 0x50
     }
 )
 
@@ -227,8 +191,6 @@ class SIYIClient:
         # Stream subscription callbacks
         self._attitude_callbacks: list[Callable[[GimbalAttitude], None]] = []
         self._function_feedback_callbacks: list[Callable[[FunctionFeedback], None]] = []
-        self._laser_callbacks: list[Callable[[LaserDistance], None]] = []
-        self._ai_tracking_callbacks: list[Callable[[AITrackingTarget], None]] = []
 
         # Active stream subscriptions (for replay on reconnect)
         self._fc_streams: dict[FCDataType, DataStreamFreq] = {}
@@ -486,14 +448,6 @@ class SIYIClient:
                 self._notify_subscribers(
                     self._function_feedback_callbacks, commands.decode_function_feedback(frame.data)
                 )
-            elif frame.cmd_id == CMD_REQUEST_LASER_DISTANCE:
-                self._notify_subscribers(
-                    self._laser_callbacks, commands.decode_laser_distance(frame.data)
-                )
-            elif frame.cmd_id == CMD_AI_TRACK_STREAM:
-                self._notify_subscribers(
-                    self._ai_tracking_callbacks, commands.decode_ai_tracking(frame.data)
-                )
             elif frame.cmd_id == CMD_REQUEST_MAGNETIC_ENCODER:
                 self._logger.debug(
                     "magnetic_encoder_push", value=commands.decode_magnetic_encoder(frame.data)
@@ -613,22 +567,12 @@ class SIYIClient:
         commands.decode_set_ip_ack(ack)
 
     # =========================================================================
-    # Focus / Zoom (0x04, 0x05, 0x06, 0x0F, 0x16, 0x18)
+    # A8 Mini digital zoom (0x05, 0x0F, 0x16, 0x18)
     # =========================================================================
 
-    async def auto_focus(self, touch_x: int, touch_y: int) -> None:
-        """Trigger auto-focus at specified touch coordinates.
-
-        Args:
-            touch_x: X coordinate (0-65535).
-            touch_y: Y coordinate (0-65535).
-        """
-        payload = commands.encode_auto_focus(1, touch_x, touch_y)
-        ack = await self._send_command(0x04, payload)
-        commands.decode_auto_focus_ack(ack)
 
     async def manual_zoom(self, direction: int) -> float:
-        """Perform manual zoom with auto-focus.
+        """Perform manual digital zoom on the A8 Mini.
 
         Args:
             direction: Zoom direction (-1=out, 0=stop, 1=in).
@@ -647,28 +591,15 @@ class SIYIClient:
                 return await self.get_current_zoom()
             raise
 
-    async def manual_focus(self, direction: int) -> None:
-        """Perform manual focus.
-
-        Args:
-            direction: Focus direction (-1=far, 0=stop, 1=near).
-        """
-        payload = commands.encode_manual_focus(direction)
-        ack = await self._send_command(0x06, payload)
-        commands.decode_manual_focus_ack(ack)
 
     async def manual_zoom_nowait(self, direction: int) -> None:
         """Send continuous zoom velocity without waiting for an acknowledgment."""
         payload = commands.encode_manual_zoom(direction)
         await self._send_command(0x05, payload, expect_response=False)
 
-    async def manual_focus_nowait(self, direction: int) -> None:
-        """Send continuous focus velocity without waiting for an acknowledgment."""
-        payload = commands.encode_manual_focus(direction)
-        await self._send_command(0x06, payload, expect_response=False)
 
     async def absolute_zoom(self, zoom: float) -> None:
-        """Set absolute zoom level with auto-focus.
+        """Set an absolute digital zoom level on the A8 Mini.
 
         Args:
             zoom: Target zoom magnification.
@@ -873,7 +804,7 @@ class SIYIClient:
         return commands.decode_magnetic_encoder(ack)
 
     async def send_raw_gps(self, gps: RawGPS) -> None:
-        """Send raw GPS data to gimbal (fire-and-forget, ZR10/ZR30/A8 only).
+        """Send raw GPS data to the A8 Mini gimbal without waiting for an acknowledgment.
 
         Args:
             gps: Raw GPS data.
@@ -898,22 +829,6 @@ class SIYIClient:
 
         return unsubscribe
 
-    def on_laser_distance(self, cb: Callable[[LaserDistance], None]) -> Unsubscribe:
-        """Subscribe to laser distance stream pushes.
-
-        Args:
-            cb: Callback to invoke on each laser distance frame.
-
-        Returns:
-            Unsubscribe callable.
-        """
-        self._laser_callbacks.append(cb)
-
-        def unsubscribe() -> None:
-            if cb in self._laser_callbacks:
-                self._laser_callbacks.remove(cb)
-
-        return unsubscribe
 
     # =========================================================================
     # Camera (0x0A, 0x0B, 0x0C, 0x20, 0x21, 0x48, 0x49, 0x4A, 0x4B, 0x4C)
@@ -988,7 +903,7 @@ class SIYIClient:
         return commands.decode_set_encoding_params_ack(ack)
 
     async def format_sd_card(self) -> bool:
-        """Format SD card (ZT30/ZR30/A8 may not respond).
+        """Format the A8 Mini SD card; firmware may not return an acknowledgment.
 
         Returns:
             True if acknowledged.
@@ -1043,394 +958,6 @@ class SIYIClient:
         payload = commands.encode_set_osd_flag(on)
         ack = await self._send_command(0x4C, payload)
         return commands.decode_set_osd_flag_ack(ack)
-
-    # =========================================================================
-    # Video stitching (0x10, 0x11)
-    # =========================================================================
-
-    async def get_video_stitching_mode(self) -> VideoStitchingMode:
-        """Request video stitching mode.
-
-        Returns:
-            Video stitching mode.
-        """
-        payload = commands.encode_get_video_stitching_mode()
-        ack = await self._send_command(0x10, payload)
-        return commands.decode_video_stitching_mode(ack)
-
-    async def set_video_stitching_mode(self, mode: VideoStitchingMode) -> VideoStitchingMode:
-        """Set video stitching mode.
-
-        Args:
-            mode: Video stitching mode.
-
-        Returns:
-            New video stitching mode.
-        """
-        payload = commands.encode_set_video_stitching_mode(mode)
-        ack = await self._send_command(0x11, payload)
-        return commands.decode_set_video_stitching_mode_ack(ack)
-
-    # =========================================================================
-    # Thermal (0x12-0x14, 0x1A, 0x1B, 0x33-0x3C, 0x42-0x47, 0x4F)
-    # =========================================================================
-
-    async def temp_at_point(self, x: int, y: int, flag: TempMeasureFlag) -> TempPoint:
-        """Measure temperature at a specific point.
-
-        Args:
-            x: X coordinate.
-            y: Y coordinate.
-            flag: Measurement mode.
-
-        Returns:
-            Temperature at point.
-        """
-        payload = commands.encode_temp_at_point(x, y, flag)
-        ack = await self._send_command(0x12, payload)
-        return commands.decode_temp_at_point(ack)
-
-    async def temp_region(
-        self, region: tuple[int, int, int, int], flag: TempMeasureFlag
-    ) -> TempRegion:
-        """Measure temperature in a rectangular region.
-
-        Args:
-            region: Tuple of (startx, starty, endx, endy).
-            flag: Measurement mode.
-
-        Returns:
-            Temperature region data.
-        """
-        payload = commands.encode_local_temp(*region, flag)
-        ack = await self._send_command(0x13, payload)
-        return commands.decode_local_temp(ack)
-
-    async def temp_global(self, flag: TempMeasureFlag) -> TempGlobal:
-        """Measure global temperature across entire frame.
-
-        Args:
-            flag: Measurement mode.
-
-        Returns:
-            Global temperature data.
-        """
-        payload = commands.encode_global_temp(flag)
-        ack = await self._send_command(0x14, payload)
-        return commands.decode_global_temp(ack)
-
-    async def get_pseudo_color(self) -> PseudoColor:
-        """Request thermal pseudo-color palette.
-
-        Returns:
-            Pseudo-color setting.
-        """
-        payload = commands.encode_get_pseudo_color()
-        ack = await self._send_command(0x1A, payload)
-        return commands.decode_pseudo_color(ack)
-
-    async def set_pseudo_color(self, c: PseudoColor) -> PseudoColor:
-        """Set thermal pseudo-color palette.
-
-        Args:
-            c: Pseudo-color palette.
-
-        Returns:
-            New pseudo-color setting.
-        """
-        payload = commands.encode_set_pseudo_color(c)
-        ack = await self._send_command(0x1B, payload)
-        return commands.decode_set_pseudo_color_ack(ack)
-
-    async def get_thermal_output_mode(self) -> ThermalOutputMode:
-        """Request thermal output mode.
-
-        Returns:
-            Thermal output mode.
-        """
-        payload = commands.encode_get_thermal_output_mode()
-        ack = await self._send_command(0x33, payload)
-        return commands.decode_thermal_output_mode(ack)
-
-    async def set_thermal_output_mode(self, m: ThermalOutputMode) -> ThermalOutputMode:
-        """Set thermal output mode.
-
-        Args:
-            m: Thermal output mode.
-
-        Returns:
-            New thermal output mode.
-        """
-        payload = commands.encode_set_thermal_output_mode(m)
-        ack = await self._send_command(0x34, payload)
-        return commands.decode_set_thermal_output_mode_ack(ack)
-
-    async def get_single_temp_frame(self) -> bool:
-        """Request single temperature frame.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_get_single_temp_frame()
-        ack = await self._send_command(0x35, payload)
-        return commands.decode_single_temp_frame_ack(ack)
-
-    async def get_thermal_gain(self) -> ThermalGain:
-        """Request thermal gain mode.
-
-        Returns:
-            Thermal gain.
-        """
-        payload = commands.encode_get_thermal_gain()
-        ack = await self._send_command(0x37, payload)
-        return commands.decode_thermal_gain(ack)
-
-    async def set_thermal_gain(self, g: ThermalGain) -> ThermalGain:
-        """Set thermal gain mode.
-
-        Args:
-            g: Thermal gain.
-
-        Returns:
-            New thermal gain.
-        """
-        payload = commands.encode_set_thermal_gain(g)
-        ack = await self._send_command(0x38, payload)
-        return commands.decode_set_thermal_gain_ack(ack)
-
-    async def get_env_correction_params(self) -> EnvCorrectionParams:
-        """Request environmental correction parameters.
-
-        Returns:
-            Environmental correction parameters.
-        """
-        payload = commands.encode_get_env_correction_params()
-        ack = await self._send_command(0x39, payload)
-        return commands.decode_env_correction_params(ack)
-
-    async def set_env_correction_params(self, p: EnvCorrectionParams) -> bool:
-        """Set environmental correction parameters.
-
-        Args:
-            p: Environmental correction parameters.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_env_correction_params(p)
-        ack = await self._send_command(0x3A, payload)
-        return commands.decode_set_env_correction_params_ack(ack)
-
-    async def get_env_correction_switch(self) -> bool:
-        """Request environmental correction switch state.
-
-        Returns:
-            True if enabled.
-        """
-        payload = commands.encode_get_env_correction_switch()
-        ack = await self._send_command(0x3B, payload)
-        return commands.decode_env_correction_switch(ack)
-
-    async def set_env_correction_switch(self, on: bool) -> bool:
-        """Set environmental correction switch state.
-
-        Args:
-            on: Enable environmental correction.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_env_correction_switch(on)
-        ack = await self._send_command(0x3C, payload)
-        return commands.decode_set_env_correction_switch_ack(ack)
-
-    async def get_ir_thresh_map_state(self) -> bool:
-        """Request IR threshold map state.
-
-        Returns:
-            True if enabled.
-        """
-        payload = commands.encode_get_ir_thresh_map_state()
-        ack = await self._send_command(0x42, payload)
-        return commands.decode_ir_thresh_map_state(ack)
-
-    async def set_ir_thresh_map_state(self, on: bool) -> bool:
-        """Set IR threshold map state.
-
-        Args:
-            on: Enable IR threshold map.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_ir_thresh_map_state(on)
-        ack = await self._send_command(0x43, payload)
-        return commands.decode_set_ir_thresh_map_state_ack(ack)
-
-    async def get_ir_thresh_params(self) -> IRThreshParams:
-        """Request IR threshold parameters.
-
-        Returns:
-            IR threshold parameters.
-        """
-        payload = commands.encode_get_ir_thresh_params()
-        ack = await self._send_command(0x44, payload)
-        return commands.decode_ir_thresh_params(ack)
-
-    async def set_ir_thresh_params(self, p: IRThreshParams) -> bool:
-        """Set IR threshold parameters.
-
-        Args:
-            p: IR threshold parameters.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_ir_thresh_params(p)
-        ack = await self._send_command(0x45, payload)
-        return commands.decode_set_ir_thresh_params_ack(ack)
-
-    async def get_ir_thresh_precision(self) -> IRThreshPrecision:
-        """Request IR threshold precision.
-
-        Returns:
-            IR threshold precision.
-        """
-        payload = commands.encode_get_ir_thresh_precision()
-        ack = await self._send_command(0x46, payload)
-        return commands.decode_ir_thresh_precision(ack)
-
-    async def set_ir_thresh_precision(self, p: IRThreshPrecision) -> IRThreshPrecision:
-        """Set IR threshold precision.
-
-        Args:
-            p: IR threshold precision.
-
-        Returns:
-            New IR threshold precision.
-        """
-        payload = commands.encode_set_ir_thresh_precision(p)
-        ack = await self._send_command(0x47, payload)
-        return commands.decode_set_ir_thresh_precision_ack(ack)
-
-    async def manual_thermal_shutter(self) -> bool:
-        """Trigger manual thermal shutter calibration.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_manual_thermal_shutter()
-        ack = await self._send_command(0x4F, payload)
-        return commands.decode_manual_thermal_shutter_ack(ack)
-
-    # =========================================================================
-    # Laser (0x15, 0x17, 0x32)
-    # =========================================================================
-
-    async def get_laser_distance(self) -> LaserDistance:
-        """Request laser distance measurement.
-
-        Returns:
-            Laser distance data.
-        """
-        payload = commands.encode_laser_distance()
-        ack = await self._send_command(0x15, payload)
-        return commands.decode_laser_distance(ack)
-
-    async def get_laser_target_latlon(self) -> LaserTargetLatLon:
-        """Request laser target latitude/longitude.
-
-        Returns:
-            Laser target coordinates.
-        """
-        payload = commands.encode_laser_target_latlon()
-        ack = await self._send_command(0x17, payload)
-        return commands.decode_laser_target_latlon(ack)
-
-    async def set_laser_ranging_state(self, on: bool) -> bool:
-        """Set laser ranging state.
-
-        Args:
-            on: Enable laser ranging.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_laser_ranging_state(on)
-        ack = await self._send_command(0x32, payload)
-        return commands.decode_set_laser_ranging_state_ack(ack)
-
-    # =========================================================================
-    # RC (0x23, 0x24)
-    # =========================================================================
-
-    async def send_rc_channels(self, ch: RCChannels) -> None:
-        """Send RC channel data to gimbal (fire-and-forget, deprecated).
-
-        Args:
-            ch: RC channels data.
-        """
-        warnings.warn(
-            "send_rc_channels is deprecated per SIYI SDK protocol",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        payload = commands.encode_rc_channels(ch)
-        await self._send_command(0x23, payload, expect_response=False)
-
-    # =========================================================================
-    # AI (0x4D, 0x4E, 0x50, 0x51)
-    # =========================================================================
-
-    async def get_ai_mode(self) -> bool:
-        """Request AI mode state.
-
-        Returns:
-            True if AI mode is enabled.
-        """
-        payload = commands.encode_get_ai_mode()
-        ack = await self._send_command(0x4D, payload)
-        return commands.decode_ai_mode(ack)
-
-    async def get_ai_stream_status(self) -> AIStreamStatus:
-        """Request AI tracking stream status.
-
-        Returns:
-            AI stream status.
-        """
-        payload = commands.encode_get_ai_stream_status()
-        ack = await self._send_command(0x4E, payload)
-        return commands.decode_ai_stream_status(ack)
-
-    async def set_ai_stream_output(self, on: bool) -> bool:
-        """Set AI tracking stream output.
-
-        Args:
-            on: Enable AI tracking stream.
-
-        Returns:
-            True if successful.
-        """
-        payload = commands.encode_set_ai_stream_output(on)
-        ack = await self._send_command(0x51, payload)
-        return commands.decode_set_ai_stream_output_ack(ack)
-
-    def on_ai_tracking(self, cb: Callable[[AITrackingTarget], None]) -> Unsubscribe:
-        """Subscribe to AI tracking stream pushes.
-
-        Args:
-            cb: Callback to invoke on each AI tracking target frame.
-
-        Returns:
-            Unsubscribe callable.
-        """
-        self._ai_tracking_callbacks.append(cb)
-
-        def unsubscribe() -> None:
-            if cb in self._ai_tracking_callbacks:
-                self._ai_tracking_callbacks.remove(cb)
-
-        return unsubscribe
 
     # =========================================================================
     # Debug / ArduPilot-only (0x27, 0x28, 0x29, 0x2A, 0x70, 0x71)
@@ -1508,8 +1035,6 @@ class SIYIClient:
 
     def create_stream(
         self,
-        stream: Literal["main", "sub"] = "main",
-        generation: object = None,
         backend: object = None,
         transport: Literal["tcp", "udp"] = "tcp",
         latency_ms: int = 100,
@@ -1523,10 +1048,6 @@ class SIYIClient:
         to begin receiving frames.
 
         Args:
-            stream: "main" for primary high-resolution stream,
-                    "sub" for secondary low-resolution stream (new-gen only).
-            generation: CameraGeneration enum value; defaults to NEW (ZT30/ZT6+).
-                        Pass CameraGeneration.OLD for ZR30/ZR10/A8Mini/A2Mini/R1M.
             backend: StreamBackend enum value; defaults to AUTO.
             transport: RTSP transport protocol; "tcp" or "udp".
             latency_ms: GStreamer rtspsrc latency in milliseconds.
@@ -1538,16 +1059,14 @@ class SIYIClient:
             A SIYIStream instance (not yet started).
         """
         from siyi_sdk.stream import SIYIStream, build_rtsp_url
-        from siyi_sdk.stream.models import CameraGeneration as _CameraGeneration
         from siyi_sdk.stream.models import StreamBackend as _StreamBackend
         from siyi_sdk.stream.models import StreamConfig
 
-        gen = _CameraGeneration.OLD if generation is None else _CameraGeneration(generation)
         bk = _StreamBackend.AUTO if backend is None else _StreamBackend(backend)
 
         # Retrieve the host IP from the underlying transport when available.
         host: str = getattr(self._transport, "_ip", "192.168.144.25")
-        url = build_rtsp_url(host=host, stream=stream, generation=gen)
+        url = build_rtsp_url(host=host)
         return SIYIStream(
             StreamConfig(
                 rtsp_url=url,

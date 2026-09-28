@@ -4,18 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""RTSP sub-stream example for new-generation cameras using OpenCV.
+"""RTSP video stream example for the A8 Mini using OpenCV.
 
-Demonstrates receiving the secondary (low-resolution) stream from a new-gen
-SIYI camera. The sub stream is available only on new-generation cameras
-(ZT30, ZT6, and later) at /video2.
+Demonstrates receiving the A8 Mini's single RTSP stream at
+rtsp://<host>:8554/main.264.
 
-Old-gen cameras (ZR10, ZR30, A8 Mini, A2 Mini, R1M) do NOT expose a sub
-stream via RTSP. Sub-stream access on old-gen uses the SIYI FPV private UDP
-protocol which is not implemented in this SDK.
-
-Target cameras: ZT30, ZT6 (new-gen only).
-Stream URL: rtsp://192.168.144.25:8554/video2
+Target cameras: A8 Mini.
+Stream URL: rtsp://192.168.144.25:8554/main.264
 """
 
 from __future__ import annotations
@@ -24,7 +19,6 @@ import asyncio
 import threading
 
 from siyi_sdk import (
-    CameraGeneration,
     SIYIStream,
     StreamBackend,
     StreamConfig,
@@ -33,20 +27,19 @@ from siyi_sdk import (
     configure_logging,
 )
 
-WINDOW_TITLE = "SIYI — Sub Stream (/video2)"
+WINDOW_TITLE = "SIYI A8 Mini — Main Stream"
 
 
 async def main() -> None:
-    """Receive and display the sub stream from a new-gen SIYI camera."""
+    """Receive and display the A8 Mini main stream."""
     try:
         import cv2  # type: ignore[import]
     except ImportError:
         print("opencv-python is required. Install with: pip install opencv-python")
         return
 
-    rtsp_url = build_rtsp_url(generation=CameraGeneration.NEW, stream="sub")
-    print(f"Connecting to sub stream: {rtsp_url}")
-    print("Note: sub stream is only available on new-gen cameras (ZT30, ZT6+).")
+    rtsp_url = build_rtsp_url()
+    print(f"Connecting to: {rtsp_url}")
 
     config = StreamConfig(
         rtsp_url=rtsp_url,
@@ -54,6 +47,7 @@ async def main() -> None:
     )
     stream = SIYIStream(config)
 
+    # Latest frame shared between the async callback and the display thread.
     latest: list[StreamFrame | None] = [None]
     lock = threading.Lock()
 
@@ -66,6 +60,7 @@ async def main() -> None:
     stop_display = threading.Event()
 
     def display_loop() -> None:
+        """Dedicated GUI thread — owns the OpenCV window and pumps Qt events."""
         cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
         while not stop_display.is_set():
             with lock:
@@ -81,7 +76,8 @@ async def main() -> None:
 
     try:
         await stream.start()
-        print("Streaming. Press Ctrl+C to stop.")
+        print(f"Streaming at {rtsp_url}. Press Ctrl+C to stop.")
+        print("The A8 Mini exposes one RTSP stream.")
         while not stop_display.is_set():
             await asyncio.sleep(1.0)
             print(f"FPS: {stream.fps:.1f}")

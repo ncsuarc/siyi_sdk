@@ -1,63 +1,11 @@
-# SIYI Web UI
+# A8 Mini web dashboard
 
-The SIYI Web UI is a modern, responsive web interface for controlling SIYI gimbal cameras and managing media on the SD card.
+Install `pip install -e ".[web]"` and run `python -m web_ui.server`. Open `http://localhost:8082`.
 
-## Features
+The dashboard shows the main RTSP video stream, gimbal status and controls, photo/record actions, digital zoom, encoding settings, and SD card media. Select Auto, OpenCV, GStreamer, or aiortsp in the Video backend menu.
 
-- **Live Video**: Proxied MJPEG stream from the camera's RTSP source.
-- **Gimbal Control**: 
-    - Virtual joystick for velocity control.
-    - One-key centering.
-    - Real-time attitude readout (Yaw, Pitch, Roll).
-- **Camera Control**:
-    - Take photos.
-    - Start/Stop video recording.
-    - Manual Zoom and Focus control.
-    - Touch-to-focus (via UI coordinates).
-- **Media Management**:
-    - Browse date-based directories.
-    - List image and video files.
-    - Direct download links for media files.
-- **Configuration**:
-    - Change camera IP address on-the-fly.
-    - View and modify encoding parameters.
+The **A8 Mini Command Explorer** lists every retained SDK command by group. Choose a command, enter its typed parameters, send it, and inspect the returned value or error. Nested values such as IP settings and GPS data use grouped fields. The live panel shows gimbal attitude and recent function feedback from the camera over the existing WebSocket.
 
-## Prerequisites
+The explorer requires a confirmation before formatting the SD card, rebooting, or changing the device IP. After an IP change, the server reconnects to the new address. The separate Camera settings IP field changes only the address the dashboard connects to; it does not reconfigure the camera.
 
-Before running the Web UI, ensure you have the necessary system dependencies for GStreamer (if using the GStreamer backend for video):
-
-```bash
-sudo ./install_gst_dependencies.sh
-```
-
-## Installation
-
-Install the SDK with web dependencies:
-
-```bash
-pip install -e ".[web]"
-```
-
-## Running the Server
-
-Start the FastAPI backend:
-
-```bash
-python -m web_ui.server
-```
-
-By default, the server runs on **port 8082**. Access it at:
-`http://localhost:8082`
-
-## Architecture
-
-- **Backend**: FastAPI (Python). It uses `SIYIClient` for commands and `MediaClient` for SD card access.
-- **Frontend**: Vanilla HTML5, CSS3, and JavaScript (ES6+).
-- **Communication**:
-    - **REST API**: For discrete commands and configuration.
-    - **WebSockets**: For real-time attitude data at 10Hz.
-    - **MJPEG**: For live video streaming in the browser without requiring external plugins.
-
-## Configuration
-
-You can change the camera IP directly from the UI by clicking the gear icon in the header. This will re-initialize the SDK clients without restarting the server.
+The browser uses an explicit server-side command registry. Unknown method names and unsupported A8 Mini commands cannot be invoked through the explorer.
