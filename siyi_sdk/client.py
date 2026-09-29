@@ -35,9 +35,12 @@ from siyi_sdk.constants import (
     HEARTBEAT_FRAME,
 )
 from siyi_sdk.exceptions import (
+    ConfigurationError,
     ConnectionError,
     NotConnectedError,
+    ResponseError,
     TimeoutError,
+    UnsupportedCommandError,
 )
 from siyi_sdk.models import (
     AircraftAttitude,
@@ -95,24 +98,44 @@ _IDEMPOTENT_READS: Final[frozenset[int]] = frozenset(
         0x0A,  # REQUEST_CAMERA_SYSTEM_INFO
         0x08,  # ONE_KEY_CENTERING (idempotent: centering twice = centering once)
         0x0D,  # REQUEST_GIMBAL_ATTITUDE
-        0x0E,  # SET_ATTITUDE (idempotent: re-sending same target angle is safe)
         0x16,  # REQUEST_ZOOM_RANGE
         0x18,  # REQUEST_ZOOM_MAGNIFICATION
         0x19,  # REQUEST_GIMBAL_MODE
         0x20,  # REQUEST_ENCODING_PARAMS
         0x26,  # REQUEST_MAGNETIC_ENCODER
-        0x27,  # REQUEST_CONTROL_MODE
-        0x28,  # REQUEST_WEAK_THRESHOLD
-        0x2A,  # REQUEST_MOTOR_VOLTAGE
-        0x31,  # REQUEST_GIMBAL_SYSTEM_INFO
-        0x40,  # REQUEST_SYSTEM_TIME
-        0x41,  # SET_SINGLE_AXIS (idempotent: same target angle)
-        0x49,  # GET_PIC_NAME_TYPE
         0x4B,  # GET_MAVLINK_OSD_FLAG
-        0x70,  # REQUEST_WEAK_CONTROL_MODE
-        0x81,  # GET_IP
     }
 )
+
+# Commands with no handler in either A8 mini dispatch table (camera v0.3.7 and
+# gimbal v0.4.9). The camera forwards them to the gimbal, which drops them on the
+# UDP/TCP links, so they never get a reply. Fail fast instead of timing out.
+_UNSUPPORTED_ON_A8: Final[frozenset[int]] = frozenset(
+    {
+        0x24,  # REQUEST_FC_DATA_STREAM
+        0x27,  # REQUEST_CONTROL_MODE
+        0x28,  # REQUEST_WEAK_THRESHOLD
+        0x29,  # SET_WEAK_THRESHOLD
+        0x2A,  # REQUEST_MOTOR_VOLTAGE (still pushed via the 0x25 stream)
+        0x31,  # REQUEST_GIMBAL_SYSTEM_INFO
+        0x40,  # REQUEST_SYSTEM_TIME
+        0x49,  # GET_PIC_NAME_TYPE
+        0x4A,  # SET_PIC_NAME_TYPE
+        0x70,  # REQUEST_WEAK_CONTROL_MODE
+        0x71,  # SET_WEAK_CONTROL_MODE
+        0x81,  # GET_IP
+        0x82,  # SET_IP
+    }
+)
+
+# Angle setpoints (0x0E, 0x41) are deliberately not retried: a retry lands after
+# the caller has moved on and drives the gimbal to a stale target.
+
+# Upper bound on the exponential backoff between retries.
+_MAX_RETRY_DELAY: Final[float] = 1.0
+
+# SD format (0x48) only ACKs once the format finishes.
+_SD_FORMAT_TIMEOUT: Final[float] = 60.0
 
 # Stream push commands (unsolicited frames from device)
 _STREAM_PUSH_CMDS: Final[frozenset[int]] = frozenset(
@@ -142,7 +165,10 @@ class SIYIClient:
         max_retries: Maximum retry attempts for idempotent reads.
         retry_base_delay: Base delay for retry backoff in seconds.
         auto_reconnect: Enable automatic reconnection on transport failure.
-        logger: Optional logger instance (uses module logger if None).
+
+    Replies are matched by command ID. The camera stamps outgoing frames with its
+    own per-link counter and relays gimbal replies unchanged, so ACK sequence
+    numbers never echo the request.
     """
 
     def __init__(
@@ -150,10 +176,9 @@ class SIYIClient:
         transport: AbstractTransport,
         *,
         default_timeout: float = 2.0,
-        max_retries: int = 10,
+        max_retries: int = 2,
         retry_base_delay: float = 0.1,
         auto_reconnect: bool = False,
-        response_matching: Literal["sequence", "command"] = "command",
     ) -> None:
         """Initialize the SIYI client.
 
@@ -161,20 +186,14 @@ class SIYIClient:
             transport: Transport instance.
             default_timeout: Default command timeout in seconds.
             max_retries: Maximum retries for idempotent reads.
-            retry_base_delay: Base delay for exponential backoff.
+            retry_base_delay: Base delay for exponential backoff (capped at 1 s).
             auto_reconnect: Enable automatic reconnection.
-            response_matching: Match by command ID by default because the SIYI
-                protocol does not require ACK frames to echo request sequences.
-                Use "sequence" only when the camera firmware does echo them.
         """
-        if response_matching not in ("sequence", "command"):
-            raise ValueError("response_matching must be 'sequence' or 'command'")
-        self._response_matching = response_matching
         self._lifecycle_lock = asyncio.Lock()
         self._closing = False
         self._supervisor_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
-        self._pending_meta: dict[int, tuple[int, bytes]] = {}
+        self._pending_meta: dict[int, bytes] = {}
         self._transport = transport
         self._default_timeout = default_timeout
         self._max_retries = max_retries
@@ -204,6 +223,9 @@ class SIYIClient:
 
         # Parser state
         self._parser = FrameParser()
+
+        # Zoom range depends on the active resolution; cleared when it may change.
+        self._zoom_range: ZoomRange | None = None
 
         # Connection event (for reconnect notifications)
         self.connection_event = asyncio.Event()
@@ -297,6 +319,7 @@ class SIYIClient:
 
     async def _cleanup_session(self) -> None:
         self.connection_event.clear()
+        self._zoom_range = None
         for fut in tuple(self._pending.values()):
             if not fut.done():
                 fut.set_exception(ConnectionError("Connection lost"))
@@ -368,6 +391,8 @@ class SIYIClient:
         max_retries: int | None = None,
         _internal: bool = False,
     ) -> bytes:
+        if cmd_id in _UNSUPPORTED_ON_A8:
+            raise UnsupportedCommandError(cmd_id=cmd_id)
         self._require_connected(_internal)
         timeout = self._default_timeout if timeout is None else timeout
         reply_id = cmd_id if response_cmd_id is None else response_cmd_id
@@ -386,7 +411,7 @@ class SIYIClient:
                     return b""
                 fut: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
                 self._pending[reply_id] = fut
-                self._pending_meta[reply_id] = (seq, payload)
+                self._pending_meta[reply_id] = payload
                 retry = False
                 try:
                     await self._transport.send(frame.to_bytes())
@@ -408,7 +433,7 @@ class SIYIClient:
                     elif not fut.cancelled():
                         fut.exception()  # Consume failures when cancellation races transport loss.
                 if retry:
-                    await asyncio.sleep(self._retry_base_delay * 2**attempt)
+                    await asyncio.sleep(min(self._retry_base_delay * 2**attempt, _MAX_RETRY_DELAY))
         return b""
 
     async def _reader(self) -> None:
@@ -422,15 +447,13 @@ class SIYIClient:
 
     async def _dispatch_frame(self, frame: Frame) -> None:
         fut = self._pending.get(frame.cmd_id)
-        meta = self._pending_meta.get(frame.cmd_id)
-        if fut is not None and not fut.done() and meta is not None:
-            seq, payload = meta
-            sequence_ok = self._response_matching == "command" or seq == frame.seq
+        payload = self._pending_meta.get(frame.cmd_id)
+        if fut is not None and not fut.done() and payload is not None:
             # These responses echo the requested stream/file selector in byte zero.
-            selector_ok = frame.cmd_id not in (0x20, 0x21, 0x24, 0x25, 0x49, 0x4A) or bool(
+            selector_ok = frame.cmd_id not in (0x20, 0x21, 0x25) or bool(
                 payload and frame.data and payload[0] == frame.data[0]
             )
-            if sequence_ok and selector_ok:
+            if selector_ok:
                 fut.set_result(frame)
         if frame.cmd_id in _STREAM_PUSH_CMDS:
             await self._dispatch_stream(frame)
@@ -507,6 +530,9 @@ class SIYIClient:
     async def get_system_time(self) -> SystemTime:
         """Request system time.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Returns:
             System time data.
         """
@@ -530,6 +556,9 @@ class SIYIClient:
 
     async def get_gimbal_system_info(self) -> GimbalSystemInfo:
         """Request gimbal system information.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
 
         Returns:
             Gimbal system info.
@@ -555,6 +584,11 @@ class SIYIClient:
     async def get_ip_config(self) -> IPConfig:
         """Request IP configuration.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything. The camera
+        keeps its address in /customer/network_config.ini and only applies it
+        at boot; change it with SIYI's own tools.
+
         Returns:
             IP configuration.
         """
@@ -564,6 +598,11 @@ class SIYIClient:
 
     async def set_ip_config(self, cfg: IPConfig) -> None:
         """Set IP configuration.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything. The camera
+        keeps its address in /customer/network_config.ini and only applies it
+        at boot; change it with SIYI's own tools.
 
         Args:
             cfg: New IP configuration.
@@ -607,10 +646,23 @@ class SIYIClient:
     async def absolute_zoom(self, zoom: float) -> None:
         """Set an absolute digital zoom level on the A8 Mini.
 
+        The usable maximum depends on the recording resolution (720p 6.0x,
+        1080p 5.5x, 1440p 3.5x, 4K 1.0x). The camera never ACKs 0x0F in 4K, so
+        the target is checked against the reported zoom range first.
+
         Args:
             zoom: Target zoom magnification.
+
+        Raises:
+            ConfigurationError: If zoom exceeds the current zoom range.
         """
         payload = commands.encode_absolute_zoom(zoom)
+        zoom_range = self._zoom_range or await self.get_zoom_range()
+        if zoom > zoom_range.max_zoom:
+            raise ConfigurationError(
+                f"zoom {zoom} exceeds the camera maximum {zoom_range.max_zoom} "
+                "at the current resolution"
+            )
         ack = await self._send_command(0x0F, payload)
         commands.decode_absolute_zoom_ack(ack)
 
@@ -622,7 +674,8 @@ class SIYIClient:
         """
         payload = commands.encode_zoom_range()
         ack = await self._send_command(0x16, payload)
-        return commands.decode_zoom_range(ack)
+        self._zoom_range = commands.decode_zoom_range(ack)
+        return self._zoom_range
 
     async def get_current_zoom(self) -> float:
         """Request current zoom magnification.
@@ -768,6 +821,9 @@ class SIYIClient:
     async def request_fc_stream(self, data_type: FCDataType, freq: DataStreamFreq) -> None:
         """Request flight controller data stream.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Args:
             data_type: Type of FC data to stream.
             freq: Stream frequency.
@@ -896,30 +952,54 @@ class SIYIClient:
         return commands.decode_get_encoding_params(ack)
 
     async def set_encoding_params(self, params: EncodingParams) -> bool:
-        """Set video encoding parameters.
+        """Set video encoding parameters and verify they took effect.
+
+        The camera ACKs success even when it ignores a field, so the settings
+        are read back with 0x20 and compared. Applying new parameters also
+        resets digital zoom to 1x.
 
         Args:
             params: New encoding parameters.
 
         Returns:
-            True if successful.
+            True if the camera applied the parameters.
+
+        Raises:
+            ResponseError: If the camera rejected or ignored the parameters.
         """
         payload = commands.encode_set_encoding_params(params)
+        self._zoom_range = None
         ack = await self._send_command(0x21, payload)
-        return commands.decode_set_encoding_params_ack(ack)
+        commands.decode_set_encoding_params_ack(ack)
+        applied = await self.get_encoding_params(params.stream_type)
+        fields = ("enc_type", "resolution_w", "resolution_h", "bitrate_kbps")
+        ignored = [name for name in fields if getattr(applied, name) != getattr(params, name)]
+        if ignored:
+            self._logger.warning("encoding_params_not_applied", ignored_fields=ignored)
+            raise ResponseError(cmd_id=0x21, sta=0)
+        return True
 
-    async def format_sd_card(self) -> bool:
-        """Format the A8 Mini SD card; firmware may not return an acknowledgment.
+    async def format_sd_card(self, *, timeout: float = _SD_FORMAT_TIMEOUT) -> bool:
+        """Format the A8 Mini SD card.
+
+        The camera only ACKs once formatting finishes, and never ACKs when no
+        card is mounted, so this waits much longer than other commands.
+
+        Args:
+            timeout: Seconds to wait for the format to complete.
 
         Returns:
             True if acknowledged.
         """
         payload = commands.encode_format_sd()
-        ack = await self._send_command(0x48, payload)
+        ack = await self._send_command(0x48, payload, timeout=timeout, max_retries=0)
         return commands.decode_format_sd_ack(ack)
 
     async def get_picture_name_type(self, ft: FileType) -> FileNameType:
         """Request file naming convention type.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
 
         Args:
             ft: File type.
@@ -933,6 +1013,9 @@ class SIYIClient:
 
     async def set_picture_name_type(self, ft: FileType, nt: FileNameType) -> None:
         """Set file naming convention type.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
 
         Args:
             ft: File type.
@@ -972,6 +1055,9 @@ class SIYIClient:
     async def get_control_mode(self) -> ControlMode:
         """Request gimbal control mode (ArduPilot debugging).
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Returns:
             Control mode.
         """
@@ -982,6 +1068,9 @@ class SIYIClient:
     async def get_weak_threshold(self) -> WeakControlThreshold:
         """Request weak control threshold parameters.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Returns:
             Weak control threshold.
         """
@@ -991,6 +1080,9 @@ class SIYIClient:
 
     async def set_weak_threshold(self, t: WeakControlThreshold) -> bool:
         """Set weak control threshold parameters.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
 
         Args:
             t: Weak control threshold.
@@ -1005,6 +1097,9 @@ class SIYIClient:
     async def get_motor_voltage(self) -> MotorVoltage:
         """Request motor voltage data.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Returns:
             Motor voltage.
         """
@@ -1015,6 +1110,9 @@ class SIYIClient:
     async def get_weak_control_mode(self) -> bool:
         """Request weak control mode state.
 
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
+
         Returns:
             True if weak control mode is enabled.
         """
@@ -1024,6 +1122,9 @@ class SIYIClient:
 
     async def set_weak_control_mode(self, on: bool) -> bool:
         """Set weak control mode state.
+
+        Not implemented by A8 mini firmware (camera v0.3.7 / gimbal v0.4.9):
+        raises UnsupportedCommandError without sending anything.
 
         Args:
             on: Enable weak control mode.

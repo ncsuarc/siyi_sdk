@@ -119,7 +119,7 @@ class TestCommandDispatchLogging:
         """Routine commands and ACKs do not flood INFO logging at 100 Hz."""
         configure_logging(level="INFO")
 
-        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
+        client = SIYIClient(mock_transport, default_timeout=0.5)
         await client.connect()
 
         mock_transport.queue_response(frame_firmware_version_ack)
@@ -140,7 +140,7 @@ class TestCommandDispatchLogging:
         monkeypatch.setenv("SIYI_PROTOCOL_TRACE", "1")
         configure_logging()
 
-        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
+        client = SIYIClient(mock_transport, default_timeout=0.5)
         await client.connect()
 
         mock_transport.queue_response(frame_firmware_version_ack)
@@ -162,7 +162,7 @@ class TestCommandDispatchLogging:
         monkeypatch.delenv("SIYI_PROTOCOL_TRACE", raising=False)
         configure_logging(level="DEBUG", trace=False)
 
-        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
+        client = SIYIClient(mock_transport, default_timeout=0.5)
         await client.connect()
 
         mock_transport.queue_response(frame_firmware_version_ack)
@@ -198,7 +198,7 @@ class TestErrorLogging:
         """Test WARNING/ERROR log on command timeout."""
         configure_logging(level="WARNING")
 
-        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.2)
+        client = SIYIClient(mock_transport, default_timeout=0.2)
         await client.connect()
 
         with contextlib.suppress(Exception):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from ..constants import CRC_LEN, HEADER_LEN, STX_BYTES
+from ..constants import CRC_LEN, HEADER_LEN, MAX_PAYLOAD_DEFAULT, STX_BYTES
 from ..exceptions import CRCError, FramingError, ProtocolError
 from .crc import crc16
 from .frame import Frame
@@ -22,7 +22,7 @@ class ParseResult:
 class FrameParser:
     """Extract frames without discarding valid neighbors of corrupt candidates."""
 
-    def __init__(self, max_payload: int = 4096) -> None:
+    def __init__(self, max_payload: int = MAX_PAYLOAD_DEFAULT) -> None:
         """Set the payload limit and initialize the partial-frame buffer."""
         if not 0 <= max_payload <= 65535:
             raise ValueError("max_payload must be between 0 and 65535")
@@ -58,7 +58,8 @@ class FrameParser:
             if end > size:
                 break
             expected = struct.unpack_from("<H", self._buffer, end - CRC_LEN)[0]
-            actual = crc16(bytes(self._buffer[start : end - CRC_LEN]))
+            with memoryview(self._buffer) as view:
+                actual = crc16(view[start : end - CRC_LEN])
             if expected != actual:
                 result.errors.append(CRCError(expected, actual, self._buffer[start:end].hex(" ")))
                 offset = start + 1

@@ -75,6 +75,11 @@ class UDPTransport(AbstractTransport):
     This transport uses asyncio's DatagramProtocol to send/receive UDP packets.
     No heartbeat is required for UDP connections.
 
+    The camera replies to whichever address sent it the most recent datagram,
+    so only one client (including the SIYI apps) can talk to it at a time. It
+    also merges and splits frames across datagrams; the client's frame parser
+    buffers across them.
+
     Example:
         >>> transport = UDPTransport(ip="192.168.144.25", port=37260)
         >>> await transport.connect()

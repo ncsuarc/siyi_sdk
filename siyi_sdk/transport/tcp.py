@@ -13,6 +13,7 @@ TCP requires periodic heartbeat frames at 1 Hz.
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import AsyncIterator
 from typing import Final
 
@@ -32,6 +33,10 @@ class TCPTransport(AbstractTransport):
     bidirectional TCP communication. TCP connections require periodic
     heartbeat frames (1 Hz) to maintain the connection.
 
+    TCP needs A8 mini camera firmware 0.3.6+ / gimbal firmware 0.4.8+. The
+    camera serves one TCP client at a time and drops it after about 4 s
+    without a 0x00 heartbeat; other traffic does not keep the link alive.
+
     Example:
         >>> transport = TCPTransport(ip="192.168.144.25", port=37260)
         >>> await transport.connect()
@@ -44,15 +49,19 @@ class TCPTransport(AbstractTransport):
         self,
         ip: str = DEFAULT_IP,
         port: int = DEFAULT_TCP_PORT,
+        *,
+        connect_timeout: float = 5.0,
     ) -> None:
         """Initialize TCP transport.
 
         Args:
             ip: Target gimbal IP address.
             port: Target TCP port.
+            connect_timeout: Seconds to wait for the TCP handshake.
         """
         self._ip: str = ip
         self._port: int = port
+        self._connect_timeout: float = connect_timeout
         self._connected: bool = False
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -64,7 +73,14 @@ class TCPTransport(AbstractTransport):
             ConnectionError: If connection fails.
         """
         try:
-            self._reader, self._writer = await asyncio.open_connection(self._ip, self._port)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self._ip, self._port), self._connect_timeout
+            )
+            self._reader, self._writer = reader, writer
+            # Small command frames must not wait behind Nagle/delayed-ACK.
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self._connected = True
             logger.info(
                 "connected",

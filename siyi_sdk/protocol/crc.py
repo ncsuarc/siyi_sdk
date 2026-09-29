@@ -22,7 +22,7 @@ from binascii import crc_hqx
 from ..constants import CRC16_INIT
 
 
-def crc16(buf: bytes, init: int = CRC16_INIT) -> int:
+def crc16(buf: bytes | bytearray | memoryview, init: int = CRC16_INIT) -> int:
     """Calculate CRC-16/XMODEM checksum.
 
     Uses the table-driven algorithm from SIYI SDK Protocol Chapter 4.

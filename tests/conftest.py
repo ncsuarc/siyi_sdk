@@ -100,7 +100,7 @@ async def connected_client(mock_transport: MockTransport) -> AsyncIterator[SIYIC
         Connected SIYIClient instance.
 
     """
-    client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
+    client = SIYIClient(mock_transport, default_timeout=0.5)
     await client.connect()
     yield client
     await client.close()
@@ -195,8 +195,8 @@ def frame_zoom_range_ack() -> bytes:
 
 @pytest.fixture
 def frame_zoom_magnification_ack() -> bytes:
-    """Zoom magnification ACK frame (0x18) — 5.5x, integral_part=5."""
-    payload = struct.pack("<HB", 55, 5)
+    """Zoom magnification ACK frame (0x18) — 5.5x as uint16 zoom x 10."""
+    payload = struct.pack("<H", 55)
     return Frame(
         ctrl=CTRL_ACK_PACK, seq=18, cmd_id=CMD_REQUEST_ZOOM_MAGNIFICATION, data=payload
     ).to_bytes()

@@ -57,8 +57,8 @@ class TestAbsoluteZoom:
 
     def test_encode_valid(self):
         assert encode_absolute_zoom(1.0) == b"\x01\x00"
-        assert encode_absolute_zoom(10.5) == b"\x0a\x05"
-        assert encode_absolute_zoom(30.0) == b"\x1e\x00"
+        assert encode_absolute_zoom(5.5) == b"\x05\x05"
+        assert encode_absolute_zoom(6.0) == b"\x06\x00"
 
     def test_encode_rounding(self):
         # 4.95 should round to 5.0 (int=5, float=0)
@@ -74,7 +74,7 @@ class TestAbsoluteZoom:
             encode_absolute_zoom(0.5)
 
         with pytest.raises(ConfigurationError):
-            encode_absolute_zoom(30.1)
+            encode_absolute_zoom(6.1)
 
     def test_decode_ack_success(self):
         decode_absolute_zoom_ack(b"\x01")  # Should not raise
@@ -109,17 +109,17 @@ class TestCurrentZoom:
     def test_encode(self):
         assert encode_current_zoom() == b""
 
-    def test_decode_chapter4_example(self):
-        # Current zoom 1.0
-        payload = b"\x01\x00"
+    def test_decode_one_x(self):
+        # A8 mini firmware sends uint16 LE zoom x 10: 1.0x -> 10
+        payload = b"\x0a\x00"
         result = decode_current_zoom(payload)
         assert result.integer == 1
         assert result.decimal == 0
         assert result.zoom == 1.0
 
     def test_decode(self):
-        # Current zoom 5.3
-        payload = b"\x05\x03"
+        # Current zoom 5.3 -> 53
+        payload = b"\x35\x00"
         result = decode_current_zoom(payload)
         assert result.integer == 5
         assert result.decimal == 3

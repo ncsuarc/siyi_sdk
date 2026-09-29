@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from siyi_sdk.constants import HEARTBEAT_FRAME
 from siyi_sdk.exceptions import CRCError, FramingError
+from siyi_sdk.protocol.frame import Frame
 from siyi_sdk.protocol.parser import FrameParser
 
 
@@ -260,14 +263,40 @@ class TestParserMaxPayload:
     """Test max_payload configuration."""
 
     def test_default_max_payload(self):
-        """Default max_payload should be 4096."""
+        """Default max_payload should be 256."""
         parser = FrameParser()
-        assert parser.max_payload == 4096
+        assert parser.max_payload == 256
 
     def test_custom_max_payload(self):
         """Custom max_payload should be respected."""
-        parser = FrameParser(max_payload=256)
-        assert parser.max_payload == 256
+        parser = FrameParser(max_payload=1024)
+        assert parser.max_payload == 1024
+
+    def test_false_stx_does_not_stall_following_ack(self):
+        """A bogus length inside corrupt data must not hold back a real ACK."""
+        parser = FrameParser()
+        attitude = Frame.build(0x0D, bytes(12), seq=1).to_bytes()
+        ack = Frame.build(0x18, b"\x19\x00", seq=2).to_bytes()
+        false_header = b"\x55\x66\x00" + struct.pack("<H", 3000)
+
+        frames = parser.feed(false_header + ack).frames
+        assert [f.cmd_id for f in frames] == [0x18]
+        assert parser.feed(attitude).frames[0].cmd_id == 0x0D
+
+    def test_false_stx_within_limit_releases_quickly(self):
+        """A bogus in-range length costs at most a few frames of delay."""
+        parser = FrameParser()
+        attitude = Frame.build(0x0D, bytes(12), seq=1).to_bytes()
+        ack = Frame.build(0x18, b"\x19\x00", seq=2).to_bytes()
+        false_header = b"\x55\x66\x00" + struct.pack("<H", parser.max_payload)
+
+        frames = parser.feed(false_header + ack).frames
+        fed = 0
+        while not frames:
+            frames = parser.feed(attitude).frames
+            fed += 1
+        assert frames[0].cmd_id == 0x18
+        assert fed <= 12
 
     def test_payload_at_max_limit(self):
         """Payload at exactly max_payload should work."""

@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Checked against the A8 mini firmware pack v0.4.9 (gimbal v0.4.9, camera v0.3.7)
+by disassembling the camera's SDK handlers.
+
+### Fixed
+
+- `get_current_zoom()` / `decode_current_zoom()` (0x18): the camera replies with
+  uint16 LE zoom x 10 (same as the 0x05 ACK), not an (int, decimal) byte pair.
+  Previously 2.5x decoded as 25.0x, including in the `manual_zoom()` stop fallback.
+- `absolute_zoom()` (0x0F): the target is limited to 1.0-6.0x (`A8MINI_MAX_ZOOM`)
+  and checked against the zoom range for the current resolution (720p 6.0x,
+  1080p 5.5x, 1440p 3.5x, 4K 1.0x). The camera never ACKs 0x0F in 4K.
+- `format_sd_card()` (0x48) waits up to 60 s by default and never retries; the
+  camera only ACKs once formatting finishes.
+- `set_encoding_params()` (0x21) accepts 2560x1440 and 3840x2160, rejects the sub
+  stream and bitrates outside the window the camera applies (recording
+  10001-30000 kbps, main 1001-4000 kbps), and reads the settings back with 0x20,
+  raising `ResponseError` if the camera ignored them (it ACKs success regardless).
+- Fixed the `Frame.to_bytes()` doctest.
+
+- Commands with no handler in either A8 mini dispatch table (0x24, 0x27-0x2A,
+  0x31, 0x40, 0x49, 0x4A, 0x70, 0x71, 0x81, 0x82) now raise the new
+  `UnsupportedCommandError` immediately instead of timing out. This includes
+  `get_ip_config()` / `set_ip_config()`: the camera keeps its address in
+  `/customer/network_config.ini` and only applies it at boot. The web UI command
+  explorer no longer lists these methods or reconnects after `set_ip_config`,
+  and reports bad arguments as 422 instead of 503.
+- Added `scripts/probe_commands.py`, a read-only hardware probe of every query.
+
+### Changed
+
+- **Breaking:** removed the `response_matching` option from `SIYIClient` and the
+  `connect_*` helpers. The camera stamps replies with its own counter and relays
+  gimbal replies unchanged, so replies are always matched by command ID.
+- Default `max_retries` is now 2 everywhere (was 10 for `SIYIClient`,
+  `connect_tcp`, `connect_serial`), and retry backoff is capped at 1 s. A dead
+  read previously took ~2 minutes to fail.
+- Angle setpoints (0x0E, 0x41) are no longer retried, so a late retry can't drive
+  the gimbal to a stale target.
+- `FrameParser` defaults to a 256-byte payload limit (`MAX_PAYLOAD_DEFAULT`, was
+  4096) so a false start marker can't hold back ACKs for over a second. CRC is
+  computed without copying the frame.
+- `TCPTransport` sets `TCP_NODELAY` and takes a `connect_timeout` (default 5 s).
+- Documented camera link behavior: UDP replies go to the most recent sender only;
+  TCP needs camera 0.3.6+ / gimbal 0.4.8+, serves one client, and drops it after
+  ~4 s without a 0x00 heartbeat.
+
 ## [0.6.0] - 2026-06-05
 
 ### Added

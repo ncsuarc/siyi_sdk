@@ -122,9 +122,6 @@ window.addEventListener('load', async () => {
             const payload = await response.json();
             if (!response.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : JSON.stringify(payload.detail));
             result.textContent = JSON.stringify(payload.result, null, 2) ?? 'Command sent.';
-            if (command.name === 'set_ip_config') {
-                document.getElementById('camera-ip-display').textContent = args.cfg.ip;
-            }
         } catch (error) {
             result.textContent = `Command failed: ${error.message}`;
         } finally {

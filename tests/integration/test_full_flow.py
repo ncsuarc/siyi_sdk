@@ -63,7 +63,7 @@ class TestConnectDisconnectFlow:
         mock_transport: MockTransport,
     ) -> None:
         """Test that context manager automatically disconnects."""
-        client = SIYIClient(mock_transport, response_matching="command", default_timeout=0.5)
+        client = SIYIClient(mock_transport, default_timeout=0.5)
         async with client:
             assert mock_transport.is_connected
 
@@ -166,7 +166,7 @@ class TestCommandRetries:
     ) -> None:
         """Test that idempotent reads retry on timeout."""
         client = SIYIClient(
-            mock_transport, response_matching="command", default_timeout=0.2, max_retries=2
+            mock_transport, default_timeout=0.2, max_retries=2
         )
         await client.connect()
 
@@ -187,7 +187,7 @@ class TestCommandRetries:
     ) -> None:
         """Test that write commands do NOT retry on timeout."""
         client = SIYIClient(
-            mock_transport, response_matching="command", default_timeout=0.2, max_retries=2
+            mock_transport, default_timeout=0.2, max_retries=2
         )
         await client.connect()
 

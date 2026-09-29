@@ -18,6 +18,7 @@ from __future__ import annotations
 import struct
 
 from siyi_sdk.constants import (
+    A8MINI_MAX_ZOOM,
     CMD_ABSOLUTE_ZOOM_AUTO_FOCUS,
     CMD_MANUAL_ZOOM_AUTO_FOCUS,
     CMD_REQUEST_ZOOM_MAGNIFICATION,
@@ -71,7 +72,9 @@ def encode_absolute_zoom(zoom: float) -> bytes:
     """Encode absolute zoom request (0x0F).
 
     Args:
-        zoom: Target zoom magnification (1.0 to 30.0).
+        zoom: Target zoom magnification (1.0 to A8MINI_MAX_ZOOM). The A8 mini
+            camera firmware clamps anything above 6.0x; the usable maximum also
+            depends on the recording resolution (see ``SIYIClient.absolute_zoom``).
 
     Returns:
         2-byte payload (uint8 int_part, uint8 float_part).
@@ -80,8 +83,8 @@ def encode_absolute_zoom(zoom: float) -> bytes:
         ConfigurationError: If zoom is out of valid range or precision.
 
     """
-    if not 1.0 <= zoom <= 30.0:
-        raise ConfigurationError(f"zoom must be in [1.0, 30.0], got {zoom}")
+    if not 1.0 <= zoom <= A8MINI_MAX_ZOOM:
+        raise ConfigurationError(f"zoom must be in [1.0, {A8MINI_MAX_ZOOM}], got {zoom}")
 
     int_part = int(zoom)
     float_part = round((zoom - int_part) * 10)
@@ -91,8 +94,6 @@ def encode_absolute_zoom(zoom: float) -> bytes:
         int_part += 1
         float_part = 0
 
-    if not 1 <= int_part <= 0x1E:
-        raise ConfigurationError(f"zoom int_part must be in [1,30], got {int_part}")
     if not 0 <= float_part <= 9:
         raise ConfigurationError(f"zoom float_part must be in [0,9], got {float_part}")
 
@@ -165,8 +166,11 @@ def encode_current_zoom() -> bytes:
 def decode_current_zoom(payload: bytes) -> CurrentZoom:
     """Decode current zoom response (0x18).
 
+    The A8 mini camera firmware replies with the same encoding as the 0x05
+    ACK (uint16 LE, zoom x 10), not the (int, decimal) byte pair in the spec.
+
     Args:
-        payload: 2 bytes (uint8 integer, uint8 decimal).
+        payload: 2 bytes (uint16 LE zoom multiple x 10).
 
     Returns:
         CurrentZoom dataclass.
@@ -180,5 +184,5 @@ def decode_current_zoom(payload: bytes) -> CurrentZoom:
             cmd_id=CMD_REQUEST_ZOOM_MAGNIFICATION,
             reason=f"expected 2 bytes, got {len(payload)}",
         )
-    integer, decimal = struct.unpack("<BB", payload)
-    return CurrentZoom(integer=integer, decimal=decimal)
+    (zoom_raw,) = struct.unpack("<H", payload)
+    return CurrentZoom(integer=zoom_raw // 10, decimal=zoom_raw % 10)

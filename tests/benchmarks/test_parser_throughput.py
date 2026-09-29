@@ -164,12 +164,12 @@ class TestParserThroughput:
     def test_parser_large_single_frame(self) -> None:
         """Test parser with a single large frame (max payload size)."""
         rng = random.Random(2026)
-        # Create a frame with large payload (4KB = max allowed by parser default)
+        # Create a frame with a large payload; the default limit is 256, so opt in to 4 KB
         large_payload = bytes([rng.randint(0, 255) for _ in range(4 * 1024)])
         frame = Frame(ctrl=1, seq=0, cmd_id=0x20, data=large_payload)  # encoding response
         wire = frame.to_bytes()
 
-        parser = FrameParser()
+        parser = FrameParser(max_payload=4 * 1024)
         start_time = time.perf_counter()
         frames = parser.feed(wire).frames
         end_time = time.perf_counter()

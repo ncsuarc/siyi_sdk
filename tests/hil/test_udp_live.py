@@ -233,7 +233,7 @@ class TestUDPLiveDeviceEdgeCases:
         transport = UDPTransport()
         from siyi_sdk.client import SIYIClient
 
-        client = SIYIClient(transport, response_matching="command", default_timeout=2.0)
+        client = SIYIClient(transport, default_timeout=2.0)
 
         # First connection
         await client.connect()

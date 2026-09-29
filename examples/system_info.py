@@ -9,7 +9,7 @@
 import asyncio
 
 from siyi_sdk import configure_logging, connect_udp
-from siyi_sdk.exceptions import TimeoutError
+from siyi_sdk.exceptions import TimeoutError, UnsupportedCommandError
 from siyi_sdk.models import FirmwareVersion
 
 
@@ -41,13 +41,13 @@ async def main() -> None:
         try:
             t = await client.get_system_time()
             print(f"system time  unix_usec={t.unix_usec}  boot_ms={t.boot_ms}")
-        except TimeoutError:
+        except (TimeoutError, UnsupportedCommandError):
             print("system time: not supported by this model")
 
         try:
             gi = await client.get_gimbal_system_info()
             print(f"gimbal system info  {gi}")
-        except TimeoutError:
+        except (TimeoutError, UnsupportedCommandError):
             print("gimbal system info: not supported by this model")
 
         try:
@@ -64,7 +64,7 @@ async def main() -> None:
         try:
             ip_cfg = await client.get_ip_config()
             print(f"network  ip={ip_cfg.ip}  mask={ip_cfg.mask}  gateway={ip_cfg.gateway}")
-        except TimeoutError:
+        except (TimeoutError, UnsupportedCommandError):
             print("network config: not supported by this model")
 
 

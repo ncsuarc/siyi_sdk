@@ -32,7 +32,7 @@ from siyi_sdk import (
     build_rtsp_url,
     configure_logging,
 )
-from siyi_sdk.exceptions import TimeoutError
+from siyi_sdk.exceptions import ConfigurationError, TimeoutError
 from siyi_sdk.transport.udp import UDPTransport
 from siyi_sdk.models import (
     CenteringAction,
@@ -106,7 +106,7 @@ class CameraState:
             transport = UDPTransport(ip)
             # A8 Mini replies observed over UDP use their own sequence counter.
             # Match ACKs by command ID; the client serializes each command ID.
-            self.client = SIYIClient(transport, max_retries=2, response_matching="command")
+            self.client = SIYIClient(transport, max_retries=2)
             self.client.on_attitude(self._on_attitude)
             self.client.on_function_feedback(self._on_feedback)
             # Status uses its own command ID lock, with one attempt per query;
@@ -789,7 +789,7 @@ async def run_sdk_command(name: str, request: CommandRequest):
         raise HTTPException(status_code=422, detail="Heartbeat is only used on TCP connections")
     try:
         result = await execute(state.client, command, request.args)
-    except ValueError as exc:
+    except (ValueError, ConfigurationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TimeoutError as exc:
         if name == "format_sd_card":
@@ -797,10 +797,6 @@ async def run_sdk_command(name: str, request: CommandRequest):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if name == "set_ip_config":
-        ip = str(request.args["cfg"]["ip"])
-        GLOBAL_CONFIG["camera_ip"] = ip
-        await state.initialize(ip)
     return {"command": name, "result": result}
 
 @app.websocket("/ws/attitude")

@@ -47,6 +47,20 @@ from siyi_sdk.models import (
     VideoEncType,
 )
 
+# Resolutions the A8 mini camera accepts for 0x21 (camera firmware v0.3.7).
+SETTABLE_RESOLUTIONS: tuple[tuple[int, int], ...] = (
+    (1280, 720),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+)
+
+# Bitrate windows (kbps) the camera applies per stream; other values are ignored.
+SETTABLE_BITRATE_KBPS: dict[StreamType, tuple[int, int]] = {
+    StreamType.RECORDING: (10001, 30000),
+    StreamType.MAIN: (1001, 4000),
+}
+
 
 def encode_camera_system_info() -> bytes:
     """Encode camera system info request (0x0A).
@@ -62,8 +76,9 @@ def decode_camera_system_info(payload: bytes) -> CameraSystemInfo:
     """Decode camera system info response (0x0A).
 
     Args:
-        payload: 7 or 8 bytes. Cameras without optical zoom (e.g. A8 Mini)
-            return 7 bytes (no zoom_linkage field); zoom_linkage defaults to 0.
+        payload: 7 or 8 bytes. A8 mini camera firmware v0.3.7 always sends 8
+            bytes (hdr_sta and zoom_linkage are always 0); a 7-byte reply
+            leaves zoom_linkage at 0.
 
     Returns:
         CameraSystemInfo dataclass.
@@ -201,6 +216,10 @@ def decode_get_encoding_params(payload: bytes) -> EncodingParams:
 def encode_set_encoding_params(params: EncodingParams) -> bytes:
     """Encode set encoding params request (0x21).
 
+    Only the recording and main streams can be changed; the camera always
+    rejects the sub stream. It silently ignores bitrates outside the window
+    for the chosen stream while still ACKing success.
+
     Args:
         params: EncodingParams dataclass.
 
@@ -208,14 +227,23 @@ def encode_set_encoding_params(params: EncodingParams) -> bytes:
         9-byte payload (uint8 + uint8 + 2xuint16 LE + uint16 LE + uint8 reserve).
 
     Raises:
-        ConfigurationError: If resolution is not 1920x1080 or 1280x720.
+        ConfigurationError: If stream, resolution, or bitrate is unsupported.
 
     """
-    # Validate resolution
-    if (params.resolution_w, params.resolution_h) not in ((1920, 1080), (1280, 720)):
+    if params.stream_type not in SETTABLE_BITRATE_KBPS:
         raise ConfigurationError(
-            f"resolution must be 1920x1080 or 1280x720, got "
-            f"{params.resolution_w}x{params.resolution_h}"
+            f"stream_type must be RECORDING or MAIN, got {params.stream_type!r}"
+        )
+    if (params.resolution_w, params.resolution_h) not in SETTABLE_RESOLUTIONS:
+        allowed = ", ".join(f"{w}x{h}" for w, h in SETTABLE_RESOLUTIONS)
+        raise ConfigurationError(
+            f"resolution must be one of {allowed}, got {params.resolution_w}x{params.resolution_h}"
+        )
+    low, high = SETTABLE_BITRATE_KBPS[params.stream_type]
+    if not low <= params.bitrate_kbps <= high:
+        raise ConfigurationError(
+            f"bitrate for {params.stream_type.name} must be in [{low}, {high}] kbps, "
+            f"got {params.bitrate_kbps}"
         )
     return struct.pack(
         "<BBHHHB",

@@ -182,6 +182,25 @@ class NACKError(CommandError):
 
 
 @dataclass
+class UnsupportedCommandError(CommandError):
+    """The A8 mini firmware has no handler for this command, so it never replies.
+
+    Attributes:
+        cmd_id: Command ID that is not implemented on the device.
+
+    """
+
+    cmd_id: int
+
+    def __str__(self) -> str:
+        """Return human-readable error message."""
+        return (
+            f"Command 0x{self.cmd_id:02X} is not implemented by A8 mini firmware "
+            "(camera v0.3.7 / gimbal v0.4.9); the device drops it without replying"
+        )
+
+
+@dataclass
 class ResponseError(CommandError):
     """Command response indicates failure.
 

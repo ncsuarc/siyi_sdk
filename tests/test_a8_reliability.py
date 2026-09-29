@@ -12,7 +12,7 @@ import pytest
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.constants import HEARTBEAT_FRAME
 from siyi_sdk.exceptions import ConnectionError, NotConnectedError
-from siyi_sdk.models import DataStreamFreq, FCDataType, GimbalDataType
+from siyi_sdk.models import DataStreamFreq, GimbalDataType
 from siyi_sdk.protocol import Frame, FrameParser, crc16
 from siyi_sdk.transport.mock import MockTransport
 
@@ -53,7 +53,7 @@ class CameraMock(MockTransport):
             return
         request = Frame.from_bytes(data)
         if self.answer:
-            payload = b"\x01" if request.cmd_id in (0x24, 0x25) else b"ok"
+            payload = request.data[:1] if request.cmd_id == 0x25 else b"ok"
             if self.fail_replay and self.connections == 2 and request.cmd_id == 0x25:
                 payload = b"\x00"
             self.queue_response(Frame(2, request.seq, request.cmd_id, payload).to_bytes())
@@ -131,12 +131,12 @@ async def test_heartbeat_uses_same_recovery():
         assert transport.max_readers == 1
 
 
-async def test_separate_registries_and_failed_replay_cleanup():
+async def test_stream_replay_and_failed_replay_cleanup():
     transport = CameraMock()
     async with SIYIClient(transport, auto_reconnect=True, default_timeout=0.1) as client:
-        await client.request_fc_stream(FCDataType.ATTITUDE, DataStreamFreq.HZ10)
+        await client.request_gimbal_stream(GimbalDataType.MAGNETIC_ENCODER, DataStreamFreq.HZ10)
         await client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ5)
-        assert len(client._fc_streams) == len(client._gimbal_streams) == 1
+        assert len(client._gimbal_streams) == 2
         transport.fail_replay = True
         transport.queue_error(StopAsyncIteration())
         await eventually(lambda: transport.connections == 3, 3)
@@ -145,7 +145,7 @@ async def test_separate_registries_and_failed_replay_cleanup():
             Frame.from_bytes(data) for data in transport.sent_frames if data != HEARTBEAT_FRAME
         ]
         assert [(frame.cmd_id, frame.data) for frame in replay[-2:]] == [
-            (0x24, bytes((FCDataType.ATTITUDE, DataStreamFreq.HZ10))),
+            (0x25, bytes((GimbalDataType.MAGNETIC_ENCODER, DataStreamFreq.HZ10))),
             (0x25, bytes((GimbalDataType.ATTITUDE, DataStreamFreq.HZ5))),
         ]
         assert transport.max_readers == 1
@@ -180,19 +180,16 @@ async def test_cancellation_cleans_only_owned_pending_future(stage):
         await client.close()
 
 
-async def test_sequence_retry_wrap_and_delayed_duplicate():
+async def test_sequence_wraps_on_retry_and_reply_matches_by_command():
     transport = CameraMock()
     transport.answer = False
-    async with SIYIClient(
-        transport, default_timeout=0.05, retry_base_delay=0, response_matching="sequence"
-    ) as client:
+    async with SIYIClient(transport, default_timeout=0.05, retry_base_delay=0) as client:
         client._seq = 65535
         query = asyncio.create_task(client._send_command(1, b""))
         await eventually(lambda: len(transport.sent_frames) >= 2)
-        transport.queue_response(Frame(0, 65535, 1, b"stale").to_bytes())
-        await asyncio.sleep(0)
-        transport.queue_response(Frame(0, 0, 1, b"fresh").to_bytes())
-        assert await query == b"fresh"
+        # Camera replies carry its own counter, never the request SEQ.
+        transport.queue_response(Frame(2, 1234, 1, b"reply").to_bytes())
+        assert await query == b"reply"
         assert [Frame.from_bytes(data).seq for data in transport.sent_frames] == [65535, 0]
 
 
@@ -201,10 +198,7 @@ async def test_sequence_retry_wrap_and_delayed_duplicate():
     [
         (0x20, b"\x01"),
         (0x21, b"\x01"),
-        (0x24, b"\x01\x0a"),
         (0x25, b"\x01\x05"),
-        (0x49, b"\x00"),
-        (0x4A, b"\x00\x02"),
     ],
 )
 async def test_wrong_echo_selector_is_rejected(cmd, payload):

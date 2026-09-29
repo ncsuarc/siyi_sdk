@@ -34,6 +34,11 @@ HEADER_LEN: Final[int] = 8  # STX(2) + CTRL(1) + Data_len(2) + SEQ(2) + CMD_ID(1
 CRC_LEN: Final[int] = 2
 MIN_FRAME_LEN: Final[int] = 10  # HEADER_LEN + CRC_LEN (empty payload)
 
+# Default parser payload limit. Camera firmware rejects frames over 1014 payload
+# bytes and every SDK reply is under 64, so a small limit keeps a false STX from
+# stalling the parser while it waits for a bogus length.
+MAX_PAYLOAD_DEFAULT: Final[int] = 256
+
 # Sequence number maximum
 SEQ_MAX: Final[int] = 0xFFFF
 
@@ -394,6 +399,10 @@ A8MINI_YAW_MIN_DEG: Final[float] = -135.0
 A8MINI_YAW_MAX_DEG: Final[float] = 135.0
 A8MINI_PITCH_MIN_DEG: Final[float] = -90.0
 A8MINI_PITCH_MAX_DEG: Final[float] = 25.0
+
+# Digital zoom ceiling: the camera firmware clamps 0x0F targets to 6.0x.
+# The usable maximum also shrinks with resolution (query 0x16).
+A8MINI_MAX_ZOOM: Final[float] = 6.0
 
 # Velocity command range for CMD 0x07 (gimbal rotation).
 GIMBAL_RATE_CMD_MIN: Final[int] = -100

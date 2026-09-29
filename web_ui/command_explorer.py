@@ -37,11 +37,13 @@ class Command:
 
 
 # Fixed allowlist: no client method can be invoked solely by guessing its name.
+# Methods whose commands the A8 mini firmware never answers (system time, gimbal
+# system info, IP get/set, picture naming, FC stream, weak-control and motor
+# voltage queries) are left out; see _UNSUPPORTED_ON_A8 in siyi_sdk/client.py.
 _GROUPS: dict[str, tuple[str, ...]] = {
     "System and network": (
-        "heartbeat", "get_firmware_version", "get_hardware_id", "get_system_time",
-        "set_utc_time", "get_gimbal_system_info", "soft_reboot", "get_ip_config",
-        "set_ip_config",
+        "heartbeat", "get_firmware_version", "get_hardware_id", "set_utc_time",
+        "soft_reboot",
     ),
     "Gimbal": (
         "rotate", "rotate_nowait", "one_key_centering", "set_attitude",
@@ -54,21 +56,16 @@ _GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "Camera and media": (
         "get_camera_system_info", "capture", "get_encoding_params",
-        "set_encoding_params", "format_sd_card", "get_picture_name_type",
-        "set_picture_name_type", "get_osd_flag", "set_osd_flag",
+        "set_encoding_params", "format_sd_card", "get_osd_flag", "set_osd_flag",
     ),
     "Autopilot and telemetry": (
-        "send_aircraft_attitude", "request_fc_stream", "request_gimbal_stream",
-        "send_raw_gps", "get_control_mode", "get_weak_threshold",
-        "set_weak_threshold", "get_motor_voltage", "get_weak_control_mode",
-        "set_weak_control_mode",
+        "send_aircraft_attitude", "request_gimbal_stream", "send_raw_gps",
     ),
 }
 
 _CONFIRMATIONS = {
     "format_sd_card": "Format the SD card and erase its files?",
     "soft_reboot": "Reboot the selected camera or gimbal modules?",
-    "set_ip_config": "Change the camera network configuration and reconnect?",
 }
 
 

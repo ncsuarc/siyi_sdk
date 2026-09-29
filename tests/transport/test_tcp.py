@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
-from siyi_sdk.exceptions import NotConnectedError
+from siyi_sdk.exceptions import ConnectionError, NotConnectedError
 from siyi_sdk.transport.tcp import TCPTransport
 
 
@@ -66,6 +67,35 @@ async def test_tcp_close(tcp_echo_server_fixture: tuple[str, int]) -> None:
     assert transport.is_connected
 
     await transport.close()
+    assert not transport.is_connected
+
+
+@pytest.mark.asyncio
+async def test_tcp_disables_nagle(tcp_echo_server_fixture: tuple[str, int]) -> None:
+    """Small command frames must not wait behind Nagle's algorithm."""
+    ip, port = tcp_echo_server_fixture
+    transport = TCPTransport(ip=ip, port=port)
+
+    await transport.connect()
+    assert transport._writer is not None
+    sock = transport._writer.get_extra_info("socket")
+    assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+
+    await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_tcp_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handshake that never completes raises ConnectionError after the timeout."""
+
+    async def never_connects(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("siyi_sdk.transport.tcp.asyncio.open_connection", never_connects)
+    transport = TCPTransport(ip="192.0.2.1", port=37260, connect_timeout=0.05)
+
+    with pytest.raises(ConnectionError):
+        await transport.connect()
     assert not transport.is_connected
 
 

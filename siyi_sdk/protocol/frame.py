@@ -65,13 +65,13 @@ class Frame:
         return len(self.data)
 
     def to_bytes(self) -> bytes:
-        """Serialize frame to wire format.
+        r"""Serialize frame to wire format.
 
         Returns:
             Complete frame bytes including STX, header, payload, and CRC.
 
         Example:
-            >>> frame = Frame(ctrl=1, seq=0, cmd_id=0x00, data=b"")
+            >>> frame = Frame(ctrl=1, seq=0, cmd_id=0x00, data=b"\x00")
             >>> frame.to_bytes().hex()
             '556601010000000000598b'
 
