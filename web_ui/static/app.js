@@ -2,6 +2,43 @@
  * SIYI SDK Web UI Frontend Logic
  */
 
+// Storage can be unavailable (private windows, blocked site data).
+const store = {
+    get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch { /* ignore */ } },
+};
+
+window.downloadJSON = (filename, data) => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'}));
+    const link = Object.assign(document.createElement('a'), {href: url, download: filename});
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+/** Resolve true only if the user confirms; `typeToConfirm` requires typing a word first. */
+window.confirmAction = (message, {title = 'Are you sure?', confirmLabel = 'Confirm', danger = false, typeToConfirm = null} = {}) => {
+    const dialog = document.getElementById('confirm-dialog');
+    const ok = document.getElementById('confirm-ok');
+    const typeLabel = document.getElementById('confirm-type-label');
+    const typeInput = document.getElementById('confirm-type-input');
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-message').textContent = message;
+    ok.textContent = confirmLabel;
+    ok.classList.toggle('btn-danger', danger);
+    ok.classList.toggle('btn-primary', !danger);
+    typeLabel.hidden = !typeToConfirm;
+    typeInput.value = '';
+    document.getElementById('confirm-type-prompt').textContent = typeToConfirm ? `Type ${typeToConfirm} to continue` : '';
+    ok.disabled = Boolean(typeToConfirm);
+    typeInput.oninput = () => { ok.disabled = typeInput.value.trim() !== typeToConfirm; };
+    dialog.returnValue = 'cancel';
+    dialog.showModal();
+    (typeToConfirm ? typeInput : document.getElementById('confirm-cancel')).focus();
+    return new Promise(resolve => {
+        dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), {once: true});
+    });
+};
+
 class SiyiApp {
     constructor() {
         this.ws = null;
@@ -21,46 +58,141 @@ class SiyiApp {
         this.motionQueues = new Map();
         this.stopHandlers = [];
         this.lastActions = new Map();
-        this.theme = localStorage.getItem('theme') || 'dark';
+        this.theme = store.get('theme') || 'dark';
 
         this.init();
     }
 
     async init() {
-        console.log("SiyiApp: Initializing...");
         try {
-            this.initTheme();
-            this.liveViewEnabled = localStorage.getItem('liveViewEnabled') !== 'false';
+            this.applyTheme();
+            this.liveViewEnabled = store.get('liveViewEnabled') !== 'false';
             document.getElementById('config-live-view-toggle').checked = this.liveViewEnabled;
-            
-            console.log("SiyiApp: Binding events...");
+            this.setupTabs();
+            this.setupPlots();
             this.bindEvents();
-            
-            console.log("SiyiApp: Setting up joystick...");
             this.setupJoystick();
-            
-            console.log("SiyiApp: Connecting WebSocket...");
+            this.setupKeyboard();
             this.connectWS();
-            
-            // Start proactive connection monitoring
-            console.log("SiyiApp: Starting connection monitor...");
+
             setInterval(() => this.checkConnection(), 3000);
             setInterval(() => {
                 if (performance.now() - this.lastStatusReceived > 2500) this.renderCameraState(null);
             }, 500);
-            
-            // Initial load
+
             this.renderConnection('checking');
             this.checkConnection();
-            console.log("SiyiApp: Initialization complete.");
         } catch (e) {
             console.error("SiyiApp: Initialization crashed!", e);
         }
     }
 
-    initTheme() {
-        console.log(`initTheme: Applying '${this.theme}' mode`);
-        this.applyTheme();
+    setupTabs() {
+        const tabs = [...document.querySelectorAll('.workspace-tabs [role=tab]')];
+        const select = name => {
+            for (const tab of tabs) {
+                const active = tab.dataset.tab === name;
+                tab.setAttribute('aria-selected', String(active));
+                tab.tabIndex = active ? 0 : -1;
+                document.getElementById(tab.getAttribute('aria-controls')).hidden = !active;
+            }
+            store.set('workspaceTab', name);
+            window.dispatchEvent(new CustomEvent('siyi-tab', {detail: name}));
+        };
+        for (const tab of tabs) {
+            tab.addEventListener('click', () => select(tab.dataset.tab));
+            tab.addEventListener('keydown', event => {
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                const next = tabs[(tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+                next.focus();
+                select(next.dataset.tab);
+            });
+        }
+        const saved = store.get('workspaceTab');
+        select(tabs.some(tab => tab.dataset.tab === saved) ? saved : 'control');
+    }
+
+    setupPlots() {
+        this.attitudePlot = new RollingPlot(document.getElementById('attitude-plot'), [
+            {key: 'yaw', color: '--plot-yaw'}, {key: 'pitch', color: '--plot-pitch'}, {key: 'roll', color: '--plot-roll'},
+        ], {unit: '°'});
+        this.rttPlot = new RollingPlot(document.getElementById('rtt-plot'), [
+            {key: 'rtt', color: '--accent-color'},
+        ], {windowMs: 60000, minSpan: 50});
+        this.lastRttSample = null;
+        const pause = document.getElementById('plot-pause');
+        pause.onclick = () => {
+            this.attitudePlot.paused = !this.attitudePlot.paused;
+            pause.textContent = this.attitudePlot.paused ? 'Resume' : 'Pause';
+            pause.classList.toggle('active', this.attitudePlot.paused);
+        };
+        window.addEventListener('siyi-tab', event => {
+            if (event.detail === 'diagnostics') { this.attitudePlot.draw(); this.rttPlot.draw(); }
+        });
+    }
+
+    setupKeyboard() {
+        // Arrow keys hold-to-rotate at a fixed speed; releasing sends a stop.
+        const speed = 50;
+        const vectors = {ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1]};
+        const held = new Set();
+        let timer = null;
+        const velocity = () => {
+            let yaw = 0, pitch = 0;
+            for (const key of held) { yaw += vectors[key][0]; pitch += vectors[key][1]; }
+            return {yaw: yaw * speed, pitch: pitch * speed};
+        };
+        const release = () => {
+            if (timer === null) return;
+            held.clear();
+            clearInterval(timer);
+            timer = null;
+            this.queueMotion('rotate', {yaw: 0, pitch: 0});
+        };
+        this.stopHandlers.push(release);
+        const zoomHold = {'+': 1, '=': 1, '-': -1};
+        let zoomKey = null;
+        const releaseZoom = () => {
+            if (zoomKey === null) return;
+            zoomKey = null;
+            clearInterval(this.zoomKeyTimer);
+            this.queueMotion('zoom', 0);
+        };
+        this.stopHandlers.push(releaseZoom);
+        const ignore = event => event.ctrlKey || event.metaKey || event.altKey ||
+            document.getElementById('panel-control').hidden ||
+            event.target.closest('input, select, textarea, button, dialog, [contenteditable]') ||
+            document.getElementById('config-modal').classList.contains('active');
+
+        document.addEventListener('keydown', event => {
+            if (ignore(event) || !this.isCameraConnected) return;
+            if (vectors[event.key]) {
+                event.preventDefault();
+                if (held.has(event.key)) return;
+                held.add(event.key);
+                this.queueMotion('rotate', velocity());
+                if (timer === null) timer = setInterval(() => this.queueMotion('rotate', velocity()), 50);
+            } else if (zoomHold[event.key] && zoomKey === null) {
+                event.preventDefault();
+                zoomKey = event.key;
+                this.queueMotion('zoom', zoomHold[event.key]);
+                this.zoomKeyTimer = setInterval(() => this.queueMotion('zoom', zoomHold[zoomKey]), 50);
+            } else if (event.key === ' ') {
+                event.preventDefault();
+                document.getElementById('stop-btn').click();
+            } else if (event.key.toLowerCase() === 'c' && !event.repeat) {
+                document.getElementById('center-btn').click();
+            }
+        });
+        document.addEventListener('keyup', event => {
+            if (vectors[event.key] && held.delete(event.key)) {
+                if (held.size) this.queueMotion('rotate', velocity());
+                else release();
+            } else if (event.key === zoomKey) {
+                releaseZoom();
+            }
+        });
     }
 
     applyTheme() {
@@ -77,7 +209,9 @@ class SiyiApp {
                 icon.className = 'fas fa-moon';
             }
         }
-        localStorage.setItem('theme', this.theme);
+        store.set('theme', this.theme);
+        this.attitudePlot?.draw();
+        this.rttPlot?.draw();
     }
 
     toggleTheme() {
@@ -87,11 +221,9 @@ class SiyiApp {
 
     async restoreUI() {
         if (!this.isCameraConnected) {
-            console.log("restoreUI skipped: Camera not connected");
             return;
         }
         
-        console.log("Restoring UI components...");
         try {
             await this.loadSystemInfo();
         } catch (e) {
@@ -175,7 +307,7 @@ class SiyiApp {
             document.getElementById('video-stream').removeAttribute('src');
             document.getElementById('video-stream').hidden = true;
             document.getElementById('video-status').hidden = true;
-            document.getElementById('media-grid').innerHTML = '<p class="media-message">Connect the camera to browse media.</p>';
+            this.mediaMessage('Connect the camera to browse media.');
         }
     }
 
@@ -197,7 +329,7 @@ class SiyiApp {
                 status.hidden = false;
                 status.innerText = `Live video unavailable: ${error.message}`;
             });
-        localStorage.setItem('liveViewEnabled', this.liveViewEnabled);
+        store.set('liveViewEnabled', this.liveViewEnabled);
     }
 
     bindEvents() {
@@ -273,47 +405,42 @@ class SiyiApp {
 
     async reboot(camera, gimbal) {
         const target = camera && gimbal ? "Camera & Gimbal" : (camera ? "Camera" : "Gimbal");
-        const confirmed = confirm(`Are you sure you want to SOFT REBOOT the ${target}? This will temporarily interrupt connectivity.`);
+        const confirmed = await confirmAction(
+            `Soft reboot the ${target}? Connectivity will be interrupted while it restarts.`,
+            {title: `Reboot ${target}`, confirmLabel: 'Reboot', danger: true});
         if (!confirmed) return;
 
-        try {
-            const res = await this.post('/api/system/reboot', {camera, gimbal});
-            if (res?.status === 'ok') {
-                alert(`${target} reboot command sent successfully.`);
-                if (camera) {
-                    this.isRebooting = true;
-                    this.isCameraConnected = false;
-                    this.renderConnection('rebooting');
-                    this.updateLiveView(); // Stop stream locally
-                }
-            } else {
-                throw new Error("Reboot command failed");
-            }
-        } catch (e) {
-            console.error("Reboot failure", e);
-            alert("Error: " + e.message);
+        const res = await this.post('/api/system/reboot', {camera, gimbal});
+        if (!res) return;
+        if (res.status !== 'ok') {
+            this.notify(`${target} reboot failed.`, true);
+            return;
+        }
+        this.notify(`${target} reboot command sent.`);
+        if (camera) {
+            this.isRebooting = true;
+            this.isCameraConnected = false;
+            this.renderConnection('rebooting');
+            this.updateLiveView(); // Stop stream locally
         }
     }
 
     async formatSD() {
-        const confirmed = confirm("WARNING: This will permanently erase ALL photos and videos on the SD card. This action cannot be undone. Are you sure you want to proceed?");
+        const confirmed = await confirmAction(
+            'This permanently erases ALL photos and videos on the SD card. It cannot be undone.',
+            {title: 'Format SD card', confirmLabel: 'Format', danger: true, typeToConfirm: 'FORMAT'});
         if (!confirmed) return;
 
-        try {
-            const res = await this.post('/api/storage/format');
-            if (res?.status === 'ok') {
-                alert("The camera acknowledged the SD card format request.");
-                this.loadMedia();
-            } else if (res?.status === 'unconfirmed') {
-                alert("Format request sent, but the camera did not acknowledge it. Check the SD card contents before relying on the result.");
-                this.loadMedia(); // Refresh to show empty state
-            } else {
-                throw new Error("Format failed");
-            }
-        } catch (e) {
-            console.error("Format failure", e);
-            alert("Error: " + e.message);
+        const res = await this.post('/api/storage/format');
+        if (!res) return;
+        if (res.status === 'ok') {
+            this.notify("The camera acknowledged the SD card format request.");
+        } else if (res.status === 'unconfirmed') {
+            this.notify("Format request sent, but the camera did not acknowledge it. Check the SD card before relying on the result.", true);
+        } else {
+            this.notify("SD card format failed.", true);
         }
+        this.loadMedia();
     }
 
     setMediaMode(mode) {
@@ -496,7 +623,7 @@ class SiyiApp {
         btn.textContent = recordPending ? 'Confirming…' : (recording ? 'Stop recording' : 'Start recording');
         btn.classList.toggle('btn-danger', recording);
         btn.disabled = !camera || recordPending || !['RECORDING', 'NOT_RECORDING'].includes(camera.recording);
-        document.getElementById('recording-badge').style.display = recording ? 'block' : 'none';
+        document.getElementById('recording-badge').hidden = !recording;
         if (data?.latency) {
             const metrics = data.latency;
             const ms = value => value == null ? '—' : `${value} ms`;
@@ -692,6 +819,16 @@ class SiyiApp {
                 if (yawEl) yawEl.innerText = freshAttitude ? data.yaw.toFixed(1) : '—';
                 if (pitchEl) pitchEl.innerText = freshAttitude ? data.pitch.toFixed(1) : '—';
                 if (rollEl) rollEl.innerText = freshAttitude ? data.roll.toFixed(1) : '—';
+                for (const axis of ['yaw', 'pitch', 'roll']) {
+                    document.getElementById(`plot-${axis}`).textContent = freshAttitude ? `${data[axis].toFixed(1)}°` : '—';
+                }
+                if (freshAttitude) this.attitudePlot.push({yaw: data.yaw, pitch: data.pitch, roll: data.roll});
+                // RTT arrives with every 10 Hz message but only changes about once a second.
+                const rttKey = `${data.latency?.queries}:${data.latency?.camera_rtt_ms}`;
+                if (data.latency?.queries && rttKey !== this.lastRttSample) {
+                    this.lastRttSample = rttKey;
+                    this.rttPlot.push({rtt: data.latency.camera_rtt_ms});
+                }
                 this.renderCameraState(data);
                 window.dispatchEvent(new CustomEvent('siyi-telemetry', {detail: data}));
             } catch (e) {
@@ -706,7 +843,6 @@ class SiyiApp {
     }
 
     async loadSystemInfo() {
-        console.log("loadSystemInfo: Fetching info...");
         // Fetch encoding info
         const encData = await this.get('/api/camera/encoding');
         if (encData && !encData.detail) {
@@ -730,91 +866,83 @@ class SiyiApp {
         }
     }
 
+    mediaMessage(text) {
+        const message = document.createElement('p');
+        message.className = 'media-message';
+        message.textContent = text;
+        document.getElementById('media-grid').replaceChildren(message);
+    }
+
+    mediaCard(iconClass, name, onClick = null, downloadUrl = null) {
+        const card = document.createElement(onClick ? 'button' : 'div');
+        card.className = 'media-card';
+        if (onClick) {
+            card.type = 'button';
+            card.onclick = onClick;
+        }
+        const thumb = document.createElement('div');
+        thumb.className = 'media-thumb';
+        const icon = document.createElement('i');
+        icon.className = `fas ${iconClass} fa-2x`;
+        thumb.append(icon);
+        const info = document.createElement('div');
+        info.className = 'media-info';
+        const label = document.createElement('div');
+        label.className = 'media-name';
+        label.textContent = name;
+        label.title = name;
+        info.append(label);
+        if (downloadUrl) {
+            const link = document.createElement('a');
+            link.className = 'btn btn-sm btn-primary btn-block media-download';
+            link.href = `/api/media/download?url=${encodeURIComponent(downloadUrl)}`;
+            link.target = '_blank';
+            link.textContent = 'Download';
+            info.append(link);
+        }
+        card.append(thumb, info);
+        return card;
+    }
+
     async loadMedia() {
         const grid = document.getElementById('media-grid');
         if (!this.isCameraConnected) {
-            grid.innerHTML = '<p class="media-message">Connect the camera to browse media.</p>';
+            this.mediaMessage('Connect the camera to browse media.');
             return;
         }
         try {
-        grid.innerHTML = '<div class="media-thumb"><i class="fas fa-spinner fa-spin"></i></div>';
-        document.getElementById('media-path-breadcrumb').innerText = this.currentMediaMode === 0 ? "/root/photo" : "/root/video";
-        
-        // Load directories
-        const dirs = await this.get('/api/media/directories', {type: this.currentMediaMode});
-        if (!this.isCameraConnected) return;
-        if (!Array.isArray(dirs)) throw new Error('Invalid media response');
-        if (!dirs || dirs.length === 0) {
-            grid.innerHTML = '<div class="overlay-card" style="grid-column: 1/-1; text-align: center;">No media found</div>';
-            return;
-        }
-
-        grid.innerHTML = '';
-        for(const dir of dirs) {
-            const el = document.createElement('div');
-            el.className = 'media-card';
-            el.innerHTML = `
-                <div class="media-thumb"><i class="fas fa-folder fa-2x"></i></div>
-                <div class="media-info">
-                    <div class="media-name">${dir.name}</div>
-                </div>
-            `;
-            el.onclick = () => this.openDirectory(dir.path);
-            grid.appendChild(el);
-        }
+            this.mediaMessage('Loading…');
+            document.getElementById('media-path-breadcrumb').textContent = this.currentMediaMode === 0 ? "/root/photo" : "/root/video";
+            const dirs = await this.get('/api/media/directories', {type: this.currentMediaMode});
+            if (!this.isCameraConnected) return;
+            if (!Array.isArray(dirs)) throw new Error('Invalid media response');
+            if (dirs.length === 0) {
+                this.mediaMessage('No media found.');
+                return;
+            }
+            grid.replaceChildren(...dirs.map(dir => this.mediaCard('fa-folder', dir.name, () => this.openDirectory(dir.path))));
         } catch (e) {
             this.showMediaError(e);
         }
     }
 
     showMediaError(error) {
-        const grid = document.getElementById('media-grid');
-        grid.innerHTML = '';
-        const message = document.createElement('p');
-        message.className = 'media-message';
-        message.innerText = `Unable to load media: ${error.message} Use Refresh to retry.`;
-        grid.appendChild(message);
+        this.mediaMessage(`Unable to load media: ${error.message} Use Refresh to retry.`);
     }
 
     async openDirectory(path) {
         if (!this.isCameraConnected) return;
         try {
-        this.currentPath = path;
-        document.getElementById('media-path-breadcrumb').innerText = path;
-        const grid = document.getElementById('media-grid');
-        grid.innerHTML = '<div class="media-thumb"><i class="fas fa-spinner fa-spin"></i></div>';
-
-        const files = await this.get('/api/media/files', {path, type: this.currentMediaMode});
-        if (!this.isCameraConnected) return;
-        if (!Array.isArray(files)) throw new Error('Invalid media response');
-        grid.innerHTML = '';
-        
-        // Add back button
-        const back = document.createElement('div');
-        back.className = 'media-card';
-        back.innerHTML = `
-            <div class="media-thumb"><i class="fas fa-arrow-left fa-2x"></i></div>
-            <div class="media-info"><div class="media-name">Back</div></div>
-        `;
-        back.onclick = () => this.loadMedia();
-        grid.appendChild(back);
-
-        if (!files) return;
-
-        const icon = this.currentMediaMode === 0 ? "fa-file-image" : "fa-file-video";
-
-        for(const file of files) {
-            const el = document.createElement('div');
-            el.className = 'media-card';
-            el.innerHTML = `
-                <div class="media-thumb"><i class="fas ${icon} fa-2x"></i></div>
-                <div class="media-info">
-                    <div class="media-name">${file.name}</div>
-                    <a href="/api/media/download?url=${encodeURIComponent(file.url)}" target="_blank" class="btn btn-sm btn-primary" style="margin-top: 10px; width: 100%;">Download</a>
-                </div>
-            `;
-            grid.appendChild(el);
-        }
+            this.currentPath = path;
+            document.getElementById('media-path-breadcrumb').textContent = path;
+            this.mediaMessage('Loading…');
+            const files = await this.get('/api/media/files', {path, type: this.currentMediaMode});
+            if (!this.isCameraConnected) return;
+            if (!Array.isArray(files)) throw new Error('Invalid media response');
+            const icon = this.currentMediaMode === 0 ? "fa-file-image" : "fa-file-video";
+            document.getElementById('media-grid').replaceChildren(
+                this.mediaCard('fa-arrow-left', 'Back', () => this.loadMedia()),
+                ...files.map(file => this.mediaCard(icon, file.name, null, file.url)));
         } catch (e) {
             this.showMediaError(e);
         }

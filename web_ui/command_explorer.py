@@ -33,7 +33,13 @@ class Command:
             "description": inspect.getdoc(getattr(SIYIClient, self.name)) or "",
             "schema": schema,
             "confirmation": self.confirmation,
+            "read_only": self.read_only,
         }
+
+    @property
+    def read_only(self) -> bool:
+        """Queries are safe to repeat; everything else changes camera state."""
+        return self.name.startswith("get_") and self.confirmation is None
 
 
 # Fixed allowlist: no client method can be invoked solely by guessing its name.

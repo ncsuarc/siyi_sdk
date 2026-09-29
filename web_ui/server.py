@@ -44,6 +44,7 @@ from siyi_sdk.models import (
     HardwareID
 )
 from web_ui.command_explorer import COMMANDS, execute
+from web_ui.frame_tap import TapTransport
 
 # Setup logging
 configure_logging(level="INFO")
@@ -58,6 +59,7 @@ GLOBAL_CONFIG = {
 class CameraState:
     def __init__(self):
         self.client: Optional[SIYIClient] = None
+        self.transport: Optional[TapTransport] = None
         self.media: Optional[MediaClient] = None
         self.stream: Optional[SIYIStream] = None
         self.stream_backend = StreamBackend.AUTO
@@ -103,7 +105,8 @@ class CameraState:
             self.is_connected = False
             
             logger.info(f"Initializing clients for IP: {ip}")
-            transport = UDPTransport(ip)
+            transport = TapTransport(UDPTransport(ip))
+            self.transport = transport
             # A8 Mini replies observed over UDP use their own sequence counter.
             # Match ACKs by command ID; the client serializes each command ID.
             self.client = SIYIClient(transport, max_retries=2)
@@ -397,6 +400,7 @@ class CameraState:
             except Exception:
                 pass
             self.client = None
+        self.transport = None
         if self.media:
             self.media = None
         logger.info("Clients shut down")
@@ -785,26 +789,44 @@ async def run_sdk_command(name: str, request: CommandRequest):
         raise HTTPException(status_code=503, detail="Camera not connected")
     if command.confirmation and not request.confirm:
         raise HTTPException(status_code=409, detail="Confirmation required")
-    if name == "heartbeat" and not state.client._transport.supports_heartbeat:
+    if name == "heartbeat" and not state.transport.supports_heartbeat:
         raise HTTPException(status_code=422, detail="Heartbeat is only used on TCP connections")
+    started_at = time.time()
+    started = time.perf_counter()
+
+    def trace(**body):
+        # Frames logged while this command ran; concurrent UI traffic may appear too.
+        frames = state.transport.between(started_at, time.time()) if state.transport else []
+        return {"command": name, "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+                "frames": frames, **body}
+
     try:
         result = await execute(state.client, command, request.args)
     except (ValueError, ConfigurationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TimeoutError as exc:
         if name == "format_sd_card":
-            return {"command": name, "result": {"sent": True, "confirmed": False}}
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+            return trace(result={"sent": True, "confirmed": False})
+        raise HTTPException(status_code=503, detail=trace(error=str(exc), status="timeout")) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"command": name, "result": result}
+        raise HTTPException(status_code=503, detail=trace(error=str(exc), status="error")) from exc
+    return trace(result=result)
+
+@app.get("/api/debug/frames")
+async def debug_frames(since: int = 0):
+    if not state.transport:
+        return {"last_id": 0, "frames": []}
+    return {"last_id": state.transport.last_id, "frames": state.transport.since(since)}
 
 @app.websocket("/ws/attitude")
 async def websocket_attitude(websocket: WebSocket):
     await websocket.accept()
     try:
         while not state.stop_event.is_set():
-            await websocket.send_json({**state.attitude, **state.status_snapshot(), "feedback": list(state.feedback)})
+            await websocket.send_json({
+                **state.attitude, **state.status_snapshot(), "feedback": list(state.feedback),
+                "frames_last_id": state.transport.last_id if state.transport else 0,
+            })
             await asyncio.sleep(0.1) # 10Hz
     except WebSocketDisconnect:
         pass
