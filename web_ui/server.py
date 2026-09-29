@@ -657,9 +657,8 @@ async def format_sd():
         success = await state.client.format_sd_card()
         return {"status": "ok" if success else "failed"}
     except TimeoutError as e:
-        # Some cameras (ZT30/A8) do not ACK format commands despite succeeding.
-        logger.warning(f"Format SD timed out, but command was likely received: {e}")
-        return {"status": "ok", "warning": "timeout"}
+        logger.warning(f"Format SD was not acknowledged: {e}")
+        return {"status": "unconfirmed", "warning": "The camera did not acknowledge the format request"}
     except Exception as e:
         logger.error(f"Format SD failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -792,6 +791,10 @@ async def run_sdk_command(name: str, request: CommandRequest):
         result = await execute(state.client, command, request.args)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        if name == "format_sd_card":
+            return {"command": name, "result": {"sent": True, "confirmed": False}}
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if name == "set_ip_config":

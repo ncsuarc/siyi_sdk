@@ -210,7 +210,7 @@ def encode_single_axis(angle_deg: float, axis: int) -> bytes:
 
 
 def decode_single_axis_ack(payload: bytes) -> SetAttitudeAck:
-    """Decode single-axis attitude acknowledgment (0x41).
+    """Decode A8 Mini single-axis acknowledgment (returned as CMD_ID 0x0E).
 
     Args:
         payload: 6 bytes (3 x int16 LE, angles x 10).

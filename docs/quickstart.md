@@ -26,6 +26,6 @@ asyncio.run(main())
 
 `connect_tcp()` and `connect_serial()` support the A8 Mini's other control inputs. TCP heartbeat is automatic. A8 Mini zoom is digital; optical focus commands are not part of this SDK.
 
-Some A8 Mini firmware replies use a sequence counter independent of requests. `connect_udp()` therefore matches replies by command ID by default. Pass `response_matching="sequence"` if your firmware echoes request sequence numbers and you need strict matching. The web dashboard uses command ID matching as well.
+SIYI defines `SEQ` as a frame sequence but does not require an ACK to repeat the request's sequence. The A8 Mini trace showed independent counters, so the SDK matches replies by command ID by default on UDP, TCP, and UART. Pass `response_matching="sequence"` only if your firmware echoes request sequences and you need strict matching. The web dashboard also matches by command ID. See the [official SIYI protocol](https://siyi.biz/siyi_file/A8%20mini/SIYI_Gimbal_Camera_External_SDK_Protocol_Update_Log%20V0.1.1.pdf).
 
 See [examples](../examples/README.md), [streaming](streaming.md), and [web UI](WEB_UI.md).

@@ -771,7 +771,7 @@ class TestGimbalCommands:
 
         # Queue ACK (6 bytes)
         ack_payload = b"\x00\x00\x00\x00\x00\x00"
-        ack_frame = Frame.build(0x41, ack_payload, seq=0, need_ack=False)
+        ack_frame = Frame.build(0x0E, ack_payload, seq=0, need_ack=False)
         mock_transport.queue_response(ack_frame.to_bytes())
 
         ack = await client.set_single_axis("yaw", 90.0)

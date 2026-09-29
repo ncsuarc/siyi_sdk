@@ -183,7 +183,9 @@ async def test_cancellation_cleans_only_owned_pending_future(stage):
 async def test_sequence_retry_wrap_and_delayed_duplicate():
     transport = CameraMock()
     transport.answer = False
-    async with SIYIClient(transport, default_timeout=0.05, retry_base_delay=0) as client:
+    async with SIYIClient(
+        transport, default_timeout=0.05, retry_base_delay=0, response_matching="sequence"
+    ) as client:
         client._seq = 65535
         query = asyncio.create_task(client._send_command(1, b""))
         await eventually(lambda: len(transport.sent_frames) >= 2)

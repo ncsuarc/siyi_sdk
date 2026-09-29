@@ -302,7 +302,10 @@ class SiyiApp {
         try {
             const res = await this.post('/api/storage/format');
             if (res?.status === 'ok') {
-                alert("SD card formatted successfully!");
+                alert("The camera acknowledged the SD card format request.");
+                this.loadMedia();
+            } else if (res?.status === 'unconfirmed') {
+                alert("Format request sent, but the camera did not acknowledge it. Check the SD card contents before relying on the result.");
                 this.loadMedia(); // Refresh to show empty state
             } else {
                 throw new Error("Format failed");

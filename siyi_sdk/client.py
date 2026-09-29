@@ -153,7 +153,7 @@ class SIYIClient:
         max_retries: int = 10,
         retry_base_delay: float = 0.1,
         auto_reconnect: bool = False,
-        response_matching: Literal["sequence", "command"] = "sequence",
+        response_matching: Literal["sequence", "command"] = "command",
     ) -> None:
         """Initialize the SIYI client.
 
@@ -163,7 +163,9 @@ class SIYIClient:
             max_retries: Maximum retries for idempotent reads.
             retry_base_delay: Base delay for exponential backoff.
             auto_reconnect: Enable automatic reconnection.
-            response_matching: Match command and sequence, or command only for compatibility.
+            response_matching: Match by command ID by default because the SIYI
+                protocol does not require ACK frames to echo request sequences.
+                Use "sequence" only when the camera firmware does echo them.
         """
         if response_matching not in ("sequence", "command"):
             raise ValueError("response_matching must be 'sequence' or 'command'")
@@ -361,13 +363,17 @@ class SIYIClient:
         payload: bytes,
         *,
         expect_response: bool = True,
+        response_cmd_id: int | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
         _internal: bool = False,
     ) -> bytes:
         self._require_connected(_internal)
         timeout = self._default_timeout if timeout is None else timeout
-        lock = self._cmd_locks.setdefault(cmd_id, asyncio.Lock())
+        reply_id = cmd_id if response_cmd_id is None else response_cmd_id
+        # A8 Mini single-axis control (0x41) replies as set-attitude (0x0E).
+        # Lock by reply ID so two commands cannot claim the same ACK at once.
+        lock = self._cmd_locks.setdefault(reply_id, asyncio.Lock())
         async with lock:
             retries = self._max_retries if max_retries is None else max_retries
             attempts = retries + 1 if expect_response and cmd_id in _IDEMPOTENT_READS else 1
@@ -379,8 +385,8 @@ class SIYIClient:
                     await self._transport.send(frame.to_bytes())
                     return b""
                 fut: asyncio.Future[Frame] = asyncio.get_running_loop().create_future()
-                self._pending[cmd_id] = fut
-                self._pending_meta[cmd_id] = (seq, payload)
+                self._pending[reply_id] = fut
+                self._pending_meta[reply_id] = (seq, payload)
                 retry = False
                 try:
                     await self._transport.send(frame.to_bytes())
@@ -394,9 +400,9 @@ class SIYIClient:
                     self._logger.warning("timeout_retrying", cmd_id=cmd_id, attempt=attempt + 1)
                     retry = True
                 finally:
-                    if self._pending.get(cmd_id) is fut:
-                        self._pending.pop(cmd_id, None)
-                        self._pending_meta.pop(cmd_id, None)
+                    if self._pending.get(reply_id) is fut:
+                        self._pending.pop(reply_id, None)
+                        self._pending_meta.pop(reply_id, None)
                     if not fut.done():
                         fut.cancel()
                     elif not fut.cancelled():
@@ -682,7 +688,7 @@ class SIYIClient:
         """
         axis_int = 0 if axis == "yaw" else 1
         payload = commands.encode_single_axis(angle_deg, axis_int)
-        ack = await self._send_command(0x41, payload)
+        ack = await self._send_command(0x41, payload, response_cmd_id=0x0E)
         return commands.decode_single_axis_ack(ack)
 
     async def rotate_nowait(self, yaw: int, pitch: int) -> None:
