@@ -12,7 +12,7 @@ import time
 import math
 from collections import deque
 from ipaddress import IPv4Address
-from typing import Optional, AsyncGenerator, Any
+from typing import Optional, AsyncGenerator, Any, Literal
 from contextlib import asynccontextmanager
 
 import cv2
@@ -45,6 +45,11 @@ from siyi_sdk.models import (
 )
 from web_ui.command_explorer import COMMANDS, execute
 from web_ui.frame_tap import TapTransport
+from web_ui.pointing import (
+    AttitudeHistory, PointingConfig, center_for, clamp_attitude, screen_to_world,
+)
+from web_ui.lock_overlay import draw_lock
+from siyi_sdk.tracking import GimbalPointLock, LockGains, LockState
 
 # Setup logging
 configure_logging(level="INFO")
@@ -92,6 +97,18 @@ class CameraState:
         self.confirmation_tasks = {}
         self.action_counter = 0
         self.last_status_failure = None
+        self.pointing = PointingConfig()
+        self.attitude_history = AttitudeHistory()
+        self.zoom: Optional[float] = None
+        self.zoom_max: Optional[float] = None
+        # Pose and zoom captured when a drag or wheel gesture began.
+        self.gesture: Optional[dict] = None
+        self.zoom_refresh_task: Optional[asyncio.Task] = None
+        # Point lock steers the gimbal from the video; raw frames are kept to start a lock.
+        self.point_lock: Optional[GimbalPointLock] = None
+        self.latest_image = None
+        self.lock_ms: Optional[float] = None
+        self.lock_last_command = (0, 0)
 
     async def initialize(self, ip: str):
         async with self.lock:
@@ -156,11 +173,12 @@ class CameraState:
                             # Telemetry support must not gate camera connectivity.
                             try:
                                 await asyncio.wait_for(
-                                    self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ10),
+                                    self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ20),
                                     timeout=2.0
                                 )
                             except Exception as e:
                                 logger.warning(f"Attitude subscription failed: {e}")
+                            await self.refresh_zoom()
                     except Exception as e:
                         logger.debug(f"Watchdog ping failed: {e}")
                         self.connection_error = (
@@ -193,6 +211,7 @@ class CameraState:
 
     def _on_attitude(self, att):
         self.attitude_time = time.monotonic()
+        self.attitude_history.add(self.attitude_time, att.yaw_deg, att.pitch_deg)
         self.attitude = {
             "yaw": att.yaw_deg,
             "pitch": att.pitch_deg,
@@ -203,11 +222,28 @@ class CameraState:
         self.feedback.append({"event": feedback.name, "time": time.time()})
 
     async def _on_frame(self, frame):
-        # Encode to JPEG for MJPEG stream
         received = time.monotonic()
+        image = frame.frame
+        self.latest_image = image
+        lock = self.point_lock
+        if lock is not None and lock.active:
+            started = time.perf_counter()
+            try:
+                status = await lock.update(image, zoom=self.zoom or 1.0, timestamp=frame.timestamp)
+            except Exception as e:
+                logger.warning(f"Point lock update failed: {e}")
+                await self.release_lock("Point lock stopped after an error")
+            else:
+                self.lock_ms = round((time.perf_counter() - started) * 1000, 1)
+                if status.state is LockState.IDLE:
+                    self.feedback.append({"event": "LOCK_LOST", "time": time.time()})
+                else:
+                    image = image.copy()  # keep the marker out of the frame the tracker reads
+                    draw_lock(image, status)
+        # Encode to JPEG for MJPEG stream
         started = time.perf_counter()
         success, buffer = await asyncio.to_thread(
-            cv2.imencode, '.jpg', frame.frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+            cv2.imencode, '.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80]
         )
         self.jpeg_ms = round((time.perf_counter() - started) * 1000, 1)
         if success:
@@ -302,6 +338,9 @@ class CameraState:
                 for kind, action in self.actions.items()
             },
             "status_age_ms": round(age * 1000) if age is not None else None,
+            "zoom": self.zoom,
+            "zoom_max": self.zoom_max,
+            "lock": self.lock_snapshot(),
             "status_fresh": self.is_connected and age is not None and age < 3 and not self.status_error,
             "status_error": self.status_error,
             "latency": {
@@ -329,6 +368,109 @@ class CameraState:
             self.motion_deadlines[kind] = time.monotonic() + 0.4
         else:
             self.motion_deadlines.pop(kind, None)
+            if kind == "zoom" and not (self.zoom_refresh_task and not self.zoom_refresh_task.done()):
+                self.zoom_refresh_task = asyncio.create_task(self.refresh_zoom())
+
+    async def _send_lock_rate(self, yaw: int, pitch: int) -> None:
+        # The lock sends every frame; a stop goes out (as three packets) only once.
+        if (yaw, pitch) == (0, 0) and self.lock_last_command == (0, 0):
+            return
+        self.lock_last_command = (yaw, pitch)
+        try:
+            await self.send_motion("rotate", (yaw, pitch))
+        except HTTPException:
+            pass  # camera offline; the watchdog and reconnect logic handle it
+
+    async def start_lock(self, x: float, y: float) -> dict:
+        """Lock the spot at normalized offset (x, y) from the centre of the latest frame."""
+        image = self.latest_image
+        if image is None or not self.is_connected:
+            raise HTTPException(status_code=503, detail="Point lock needs live video from a connected camera")
+        cfg = self.pointing
+        gains = LockGains(kp=cfg.lock_gain, max_speed=cfg.lock_max_speed)
+        lock = GimbalPointLock(send=self._send_lock_rate, hfov_deg=cfg.hfov_deg,
+                               model=cfg.lock_model, gains=gains)
+        height, width = image.shape[:2]
+        lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
+        if self.point_lock is not None:
+            await self.point_lock.release()
+        self.point_lock = lock
+        self.lock_last_command = None  # always send the first command of a new lock
+        return self.lock_snapshot()
+
+    async def release_lock(self, reason: Optional[str] = None) -> None:
+        lock, self.point_lock = self.point_lock, None
+        if lock is not None and lock.active:
+            await lock.release()
+            if reason:
+                logger.info(reason)
+
+    def lock_snapshot(self) -> dict:
+        lock = self.point_lock
+        if lock is None or not lock.active:
+            return {"state": "idle"}
+        s = lock.status
+        return {
+            "state": s.state.value, "score": round(s.score, 2), "on_screen": s.on_screen,
+            "x": round(s.x / s.width - 0.5, 4) if s.width else 0.0,
+            "y": round(s.y / s.height - 0.5, 4) if s.height else 0.0,
+            "error_deg": [round(v, 1) for v in s.error_deg], "command": list(s.command),
+            "update_ms": self.lock_ms,
+        }
+
+    async def refresh_zoom(self):
+        """Read the zoom level and range; pointer math needs the current field of view."""
+        client = self.client
+        if not client:
+            return
+        try:
+            if self.zoom_max is None:
+                self.zoom_max = (await client.get_zoom_range()).max_zoom
+            self.zoom = await client.get_current_zoom()
+        except Exception as e:
+            logger.debug(f"Zoom query failed: {e}")
+
+    async def look(self, req: "LookRequest"):
+        """Point the gimbal so the scene at `anchor` appears at `to`, optionally at a new zoom."""
+        if not self.client or not self.is_connected:
+            raise HTTPException(status_code=503, detail="Camera not connected")
+        cfg = self.pointing
+        same = req.gesture and self.gesture and self.gesture["id"] == req.gesture
+        gesture = self.gesture if same else None
+        if gesture is None:
+            # Use the pose from when the clicked frame was captured, not the latest one.
+            pose = self.attitude_history.at(time.monotonic() - cfg.video_delay_ms / 1000)
+            if pose is None:
+                raise HTTPException(status_code=503, detail="No gimbal attitude received yet")
+            gesture = {
+                "id": req.gesture,
+                "yaw": pose[0] * cfg.yaw_sign, "pitch": pose[1] * cfg.pitch_sign,
+                "zoom": self.zoom or 1.0,
+            }
+            self.gesture = gesture if req.gesture else None
+        zoom = gesture["zoom"]
+        if req.zoom is not None:
+            zoom = max(1.0, min(round(req.zoom, 1), self.zoom_max or 6.0))
+        optics = {"aspect": req.aspect, "hfov_deg": cfg.hfov_deg}
+        world = screen_to_world(gesture["yaw"], gesture["pitch"], req.anchor_x, req.anchor_y,
+                                zoom=gesture["zoom"], **optics)
+        yaw, pitch = center_for(*world, req.to_x, req.to_y, zoom=zoom,
+                                pitch_hint=gesture["pitch"], **optics)
+        wanted = (yaw * cfg.yaw_sign, pitch * cfg.pitch_sign)
+        target = clamp_attitude(*wanted)
+        if req.zoom is not None and zoom != self.zoom:
+            try:
+                await self.client.absolute_zoom(zoom)
+                self.zoom = zoom
+            except ConfigurationError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+        await self.client.set_attitude_nowait(*target)
+        return {
+            "yaw": round(target[0], 1), "pitch": round(target[1], 1), "zoom": self.zoom,
+            "zoom_max": self.zoom_max,
+            # True when the gimbal's travel limits cut the move short.
+            "limited": any(abs(a - b) > 0.05 for a, b in zip(target, wanted, strict=True)),
+        }
 
     async def motion_watchdog(self):
         # Stop if the page disappears or updates stop arriving. UDP delivery is
@@ -369,6 +511,12 @@ class CameraState:
         self.motion_deadlines.clear()
         self.camera_status = None
         self.status_time = self.attitude_time = 0.0
+        self.attitude_history.clear()
+        self.zoom = self.zoom_max = None
+        self.gesture = None
+        self.point_lock = None  # motion is stopped above; no command needed
+        self.latest_image = None
+        self.lock_ms = None
         self.status_error = None
         self.rtt_samples.clear()
         self.rtt_failures.clear()
@@ -475,6 +623,35 @@ class CommandRequest(BaseModel):
 class BackendRequest(BaseModel):
     backend: StreamBackend
 
+class LookRequest(BaseModel):
+    # Normalized offsets from the image center: -0.5 = left/top edge, 0.5 = right/bottom.
+    anchor_x: float = Field(ge=-0.5, le=0.5)
+    anchor_y: float = Field(ge=-0.5, le=0.5)
+    to_x: float = Field(default=0.0, ge=-0.5, le=0.5)
+    to_y: float = Field(default=0.0, ge=-0.5, le=0.5)
+    aspect: float = Field(default=16 / 9, gt=0.2, lt=5)
+    zoom: Optional[float] = Field(default=None, ge=1.0, le=30.0)
+    # Requests sharing a gesture id keep the pose and zoom from its first request.
+    gesture: Optional[str] = Field(default=None, max_length=64)
+
+class PointingConfigRequest(BaseModel):
+    hfov_deg: float = Field(gt=5, lt=170)
+    yaw_sign: Literal[-1, 1]
+    pitch_sign: Literal[-1, 1]
+    video_delay_ms: float = Field(ge=0, le=3000)
+    # Defaults keep settings saved by older dashboards valid.
+    lock_gain: float = Field(default=2.0, gt=0, le=20)
+    lock_max_speed: int = Field(default=60, ge=5, le=100)
+    lock_model: Literal["local", "global"] = "local"
+
+class LockRequest(BaseModel):
+    # Normalized offsets from the image centre: -0.5 = left/top edge, 0.5 = right/bottom.
+    x: float = Field(ge=-0.5, le=0.5)
+    y: float = Field(ge=-0.5, le=0.5)
+
+class ZoomRequest(BaseModel):
+    zoom: float = Field(ge=1.0, le=30.0)
+
 # Endpoints
 @app.post("/api/config/ip")
 async def set_ip(req: IPConfigRequest):
@@ -524,6 +701,8 @@ async def set_gimbal_mode(req: GimbalModeRequest):
 @app.post("/api/gimbal/rotate")
 async def rotate(req: RotateRequest):
     started = time.perf_counter()
+    # Manual control takes over from point lock.
+    await state.release_lock("Point lock released by manual rotation")
     try:
         await state.send_motion("rotate", (req.yaw, req.pitch))
     except HTTPException:
@@ -532,10 +711,56 @@ async def rotate(req: RotateRequest):
         raise HTTPException(status_code=503, detail=str(e))
     return {"status": "sent", "confirmed": False, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
 
+@app.post("/api/gimbal/look")
+async def look(req: LookRequest):
+    started = time.perf_counter()
+    await state.release_lock("Point lock released by pointer aiming")
+    try:
+        result = await state.look(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {**result, "command_timing": {"send_ms": round((time.perf_counter() - started) * 1000, 1)}}
+
+@app.get("/api/pointing/config")
+async def get_pointing_config():
+    return vars(state.pointing)
+
+@app.post("/api/pointing/config")
+async def set_pointing_config(req: PointingConfigRequest):
+    state.pointing = PointingConfig(**req.model_dump())
+    return vars(state.pointing)
+
+@app.post("/api/track/lock")
+async def track_lock(req: LockRequest):
+    return await state.start_lock(req.x, req.y)
+
+@app.post("/api/track/release")
+async def track_release():
+    await state.release_lock("Point lock released from the dashboard")
+    return state.lock_snapshot()
+
+@app.post("/api/camera/zoom_to")
+async def zoom_to(req: ZoomRequest):
+    """Set an absolute zoom without moving the gimbal (keeps a point lock running)."""
+    if not state.client or not state.is_connected:
+        raise HTTPException(status_code=503, detail="Camera not connected")
+    zoom = max(1.0, min(round(req.zoom, 1), state.zoom_max or 6.0))
+    try:
+        await state.client.absolute_zoom(zoom)
+    except ConfigurationError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    state.zoom = zoom
+    return {"zoom": zoom, "zoom_max": state.zoom_max}
+
 @app.post("/api/gimbal/center")
 async def center():
     if not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
+    await state.release_lock("Point lock released by centering")
     try:
         started = time.perf_counter()
         await state.client.one_key_centering(CenteringAction.CENTER)

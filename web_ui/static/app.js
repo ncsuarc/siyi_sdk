@@ -58,6 +58,12 @@ class SiyiApp {
         this.motionQueues = new Map();
         this.stopHandlers = [];
         this.lastActions = new Map();
+        this.look = {pending: false, latest: null, lastSent: 0, limitNotified: 0};
+        this.zoomLevel = null;
+        this.zoomMax = null;
+        this.lockState = 'idle';
+        this.lockReleasing = false;
+        this.zoomTarget = {pending: false, latest: null};
         this.theme = store.get('theme') || 'dark';
 
         this.init();
@@ -72,7 +78,9 @@ class SiyiApp {
             this.setupPlots();
             this.bindEvents();
             this.setupJoystick();
+            this.setupPointer();
             this.setupKeyboard();
+            this.loadPointingConfig();
             this.connectWS();
 
             setInterval(() => this.checkConnection(), 3000);
@@ -476,7 +484,7 @@ class SiyiApp {
         try {
             const resp = await fetch(fullUrl, {...options, signal: controller.signal, cache: 'no-store'});
             const data = await resp.json();
-            if (options.method === 'POST' && /^\/api\/(gimbal|camera)\//.test(url)) {
+            if (options.method === 'POST' && /^\/api\/(gimbal|camera|track)\//.test(url)) {
                 document.getElementById('latency-browser').textContent = `${Math.round(performance.now() - started)} ms`;
                 const timing = /app;dur=([\d.]+)/.exec(resp.headers.get('Server-Timing') || '');
                 document.getElementById('latency-server').textContent = timing ? `${Number(timing[1]).toFixed(1)} ms` : '—';
@@ -484,7 +492,9 @@ class SiyiApp {
                     '/api/gimbal/rotate': 'Gimbal velocity', '/api/gimbal/center': 'Center',
                     '/api/gimbal/mode': 'Gimbal mode', '/api/camera/record': 'Recording toggle',
                     '/api/camera/photo': 'Photo', '/api/camera/zoom': 'Zoom velocity',
-                    '/api/camera/encoding': 'Encoding settings'
+                    '/api/camera/encoding': 'Encoding settings', '/api/gimbal/look': 'Point',
+                    '/api/track/lock': 'Point lock', '/api/track/release': 'Release lock',
+                    '/api/camera/zoom_to': 'Zoom to'
                 };
                 let suffix = '';
                 if (url === '/api/gimbal/mode') suffix = ` · ${JSON.parse(options.body).mode}`;
@@ -536,6 +546,8 @@ class SiyiApp {
                 this.isRebooting = false;
                 this.renderConnection('offline');
             }
+
+            await this.savePointingConfig();
 
             if (resValue && this.isCameraConnected && !ipChanged) {
                 const res = await this.request('/api/camera/encoding', {
@@ -805,6 +817,272 @@ class SiyiApp {
         for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) zone.addEventListener(name, stopMove);
     }
 
+    setupPointer() {
+        // Point-and-drag control on the video: the server turns screen
+        // positions into absolute gimbal angles (see web_ui/pointing.py).
+        const video = document.getElementById('video-stream');
+        const marker = document.getElementById('aim-marker');
+        const toggle = document.getElementById('pointer-control-toggle');
+        toggle.checked = store.get('pointerControl') !== 'false';
+        const sync = () => video.classList.toggle('pointer-aim', toggle.checked);
+        toggle.addEventListener('change', () => { store.set('pointerControl', String(toggle.checked)); sync(); });
+        sync();
+        video.draggable = false;
+        video.addEventListener('dragstart', event => event.preventDefault());
+
+        const clickAction = document.getElementById('click-action-select');
+        clickAction.value = store.get('clickAction') === 'lock' ? 'lock' : 'aim';
+        clickAction.addEventListener('change', () => store.set('clickAction', clickAction.value));
+        document.getElementById('release-lock-btn').addEventListener('click', () => this.releaseLock());
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && this.lockState !== 'idle' &&
+                !document.getElementById('config-modal').classList.contains('active')) {
+                this.releaseLock();
+            }
+        });
+
+        const enabled = () => toggle.checked && this.isCameraConnected;
+        const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+        // The image keeps its aspect ratio, so its box is exactly the picture.
+        const locate = event => {
+            const rect = video.getBoundingClientRect();
+            return {
+                x: clamp((event.clientX - rect.left) / rect.width - 0.5, -0.5, 0.5),
+                y: clamp((event.clientY - rect.top) / rect.height - 0.5, -0.5, 0.5),
+                aspect: video.naturalWidth && video.naturalHeight
+                    ? video.naturalWidth / video.naturalHeight : rect.width / rect.height,
+                px: event.clientX - rect.left, py: event.clientY - rect.top,
+            };
+        };
+        let gestures = 0;
+        const newGesture = () => `${Date.now()}-${++gestures}`;
+        const showMarker = point => {
+            const rect = video.getBoundingClientRect();
+            const box = video.parentElement.getBoundingClientRect();
+            marker.hidden = true;
+            marker.style.left = `${rect.left - box.left + point.px}px`;
+            marker.style.top = `${rect.top - box.top + point.py}px`;
+            void marker.offsetWidth; // restart the animation
+            marker.hidden = false;
+        };
+
+        let drag = null;
+        video.addEventListener('pointerdown', event => {
+            if (!enabled() || event.button !== 0 || drag) return;
+            event.preventDefault();
+            video.setPointerCapture(event.pointerId);
+            drag = {pointerId: event.pointerId, start: locate(event), moved: false, gesture: newGesture()};
+        });
+        video.addEventListener('pointermove', event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            const point = locate(event);
+            if (!drag.moved && Math.hypot(point.px - drag.start.px, point.py - drag.start.py) < 5) return;
+            drag.moved = true;
+            video.classList.add('dragging');
+            // Keep the scene point grabbed at the start under the cursor.
+            this.queueLook({
+                anchor_x: drag.start.x, anchor_y: drag.start.y, to_x: point.x, to_y: point.y,
+                aspect: point.aspect, gesture: drag.gesture,
+            });
+        });
+        const endDrag = event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            const finished = drag;
+            drag = null;
+            video.classList.remove('dragging');
+            if (event.type === 'pointerup' && !finished.moved) {
+                showMarker(finished.start);
+                if (clickAction.value === 'lock') this.lockAt(finished.start);
+                else this.queueLook({anchor_x: finished.start.x, anchor_y: finished.start.y, aspect: finished.start.aspect});
+            }
+        };
+        for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) video.addEventListener(name, endDrag);
+
+        let wheel = null;
+        video.addEventListener('wheel', event => {
+            if (!enabled()) return;
+            event.preventDefault();
+            const point = locate(event);
+            const now = performance.now();
+            // Wheel ticks within 400 ms form one gesture anchored where it began.
+            if (!wheel || now - wheel.time > 400) {
+                wheel = {gesture: newGesture(), anchor: point, zoom: this.zoomLevel ?? 1};
+            }
+            wheel.time = now;
+            const steps = -event.deltaY / (event.deltaMode === 1 ? 3 : 100);
+            wheel.zoom = clamp(wheel.zoom * 1.15 ** steps, 1, this.zoomMax ?? 6);
+            if (this.lockState !== 'idle') {
+                // Zoom in place; the lock keeps the spot centred and survives the scale change.
+                this.queueZoom(Math.round(wheel.zoom * 10) / 10);
+                return;
+            }
+            this.queueLook({
+                anchor_x: wheel.anchor.x, anchor_y: wheel.anchor.y, to_x: point.x, to_y: point.y,
+                aspect: point.aspect, zoom: Math.round(wheel.zoom * 10) / 10, gesture: wheel.gesture,
+            });
+        }, {passive: false});
+    }
+
+    async lockAt(point) {
+        try {
+            const lock = await this.request('/api/track/lock', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({x: point.x, y: point.y})
+            }, {}, 3000);
+            this.renderLock(lock);
+            this.notify('Locked on the spot. The gimbal will keep it centred.');
+        } catch (e) {
+            this.notify(`Lock failed: ${e.message}`, true);
+        }
+    }
+
+    async releaseLock() {
+        this.lockReleasing = true;
+        try {
+            this.renderLock(await this.request('/api/track/release', {method: 'POST'}, {}, 3000));
+            this.notify('Point lock released.');
+        } catch (e) {
+            this.notify(`Release failed: ${e.message}`, true);
+        } finally {
+            this.lockReleasing = false;
+        }
+    }
+
+    renderLock(lock) {
+        const state = lock?.state ?? 'idle';
+        const was = this.lockState;
+        this.lockState = state;
+        document.getElementById('release-lock-btn').hidden = state === 'idle';
+        const badge = document.getElementById('lock-badge');
+        badge.hidden = state === 'idle';
+        badge.classList.toggle('searching', state === 'searching');
+        if (state !== 'idle') {
+            const [yaw, pitch] = lock.error_deg ?? [0, 0];
+            badge.textContent = state === 'locked'
+                ? `LOCK ${lock.score.toFixed(2)} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`
+                : 'LOCK SEARCHING · holding still';
+        }
+        // The server drops a lock it can't recover or that manual control replaced.
+        if (was !== 'idle' && state === 'idle' && !this.lockReleasing) {
+            this.notify('Point lock ended: the spot was lost or another control took over.', true);
+        }
+    }
+
+    queueZoom(zoom) {
+        // Latest target wins; one zoom request in flight.
+        const queue = this.zoomTarget;
+        queue.latest = zoom;
+        if (queue.pending) return;
+        queue.pending = true;
+        (async () => {
+            try {
+                while (queue.latest !== null) {
+                    const value = queue.latest;
+                    queue.latest = null;
+                    const result = await this.request('/api/camera/zoom_to', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({zoom: value})
+                    }, {}, 2000);
+                    this.zoomLevel = result.zoom;
+                }
+            } catch (e) {
+                queue.latest = null;
+                this.notify(`Zoom failed: ${e.message}`, true);
+            } finally {
+                queue.pending = false;
+            }
+        })();
+    }
+
+    queueLook(body) {
+        // Latest target wins; at most one request in flight and about 20 per second.
+        this.look.latest = body;
+        if (!this.look.pending) this.flushLook();
+    }
+
+    async flushLook() {
+        const look = this.look;
+        look.pending = true;
+        try {
+            while (look.latest) {
+                const wait = 50 - (performance.now() - look.lastSent);
+                if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+                const body = look.latest;
+                look.latest = null;
+                look.lastSent = performance.now();
+                try {
+                    const result = await this.request('/api/gimbal/look', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+                    }, {}, 2000);
+                    if (result.zoom != null) this.zoomLevel = result.zoom;
+                    if (result.zoom_max != null) this.zoomMax = result.zoom_max;
+                    if (result.limited && performance.now() - look.limitNotified > 3000) {
+                        look.limitNotified = performance.now();
+                        this.notify('That point is past the gimbal travel limit; the camera stopped at the limit.');
+                    }
+                } catch (e) {
+                    look.latest = null;
+                    this.notify(`Aim failed: ${e.message}`, true);
+                }
+            }
+        } finally {
+            look.pending = false;
+        }
+    }
+
+    pointingFields() {
+        return {
+            hfov: document.getElementById('pointing-hfov-input'),
+            delay: document.getElementById('pointing-delay-input'),
+            yaw: document.getElementById('pointing-invert-yaw'),
+            pitch: document.getElementById('pointing-invert-pitch'),
+            gain: document.getElementById('lock-gain-input'),
+            speed: document.getElementById('lock-speed-input'),
+            model: document.getElementById('lock-model-select'),
+        };
+    }
+
+    showPointingConfig(config) {
+        const fields = this.pointingFields();
+        fields.hfov.value = config.hfov_deg;
+        fields.delay.value = config.video_delay_ms;
+        fields.yaw.checked = config.yaw_sign === -1;
+        fields.pitch.checked = config.pitch_sign === -1;
+        fields.gain.value = config.lock_gain ?? 2;
+        fields.speed.value = config.lock_max_speed ?? 60;
+        fields.model.value = config.lock_model ?? 'local';
+    }
+
+    async loadPointingConfig() {
+        // The server forgets settings on restart, so this browser keeps a copy.
+        try {
+            const saved = JSON.parse(store.get('pointingConfig') || 'null');
+            const config = saved
+                ? await this.request('/api/pointing/config', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(saved)
+                })
+                : await this.request('/api/pointing/config');
+            this.showPointingConfig(config);
+        } catch (e) {
+            console.warn('Pointing settings unavailable', e);
+        }
+    }
+
+    async savePointingConfig() {
+        const fields = this.pointingFields();
+        const config = await this.request('/api/pointing/config', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                hfov_deg: Number(fields.hfov.value), video_delay_ms: Number(fields.delay.value),
+                yaw_sign: fields.yaw.checked ? -1 : 1, pitch_sign: fields.pitch.checked ? -1 : 1,
+                lock_gain: Number(fields.gain.value), lock_max_speed: Math.round(Number(fields.speed.value)),
+                lock_model: fields.model.value,
+            })
+        });
+        store.set('pointingConfig', JSON.stringify(config));
+        this.showPointingConfig(config);
+    }
+
     connectWS() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         this.ws = new WebSocket(`${protocol}//${window.location.host}/ws/attitude`);
@@ -829,6 +1107,9 @@ class SiyiApp {
                     this.lastRttSample = rttKey;
                     this.rttPlot.push({rtt: data.latency.camera_rtt_ms});
                 }
+                if (data.zoom != null) this.zoomLevel = data.zoom;
+                if (data.zoom_max != null) this.zoomMax = data.zoom_max;
+                this.renderLock(data.lock);
                 this.renderCameraState(data);
                 window.dispatchEvent(new CustomEvent('siyi-telemetry', {detail: data}));
             } catch (e) {

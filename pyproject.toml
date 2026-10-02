@@ -35,6 +35,21 @@ stream-opencv  = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
 stream-gst     = ["numpy>=1.21,<2.3", "PyGObject>=3.42"]
 stream-aiortsp = ["numpy>=1.21,<2.3", "aiortsp>=1.4,<2", "av>=14"]
 web            = ["numpy>=1.21,<2.3", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5"]
+tracking       = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=5,<6",
+    "hypothesis>=6.100,<7",
+    "mypy>=1.10,<2",
+    "ruff>=0.5,<1",
+    "black>=24.3,<26",
+    "pre-commit>=3.7,<5",
+    "opencv-python>=4.5",
+    "numpy>=1.21,<2.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/ncsuarc/siyi_sdk"

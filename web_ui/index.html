@@ -43,6 +43,18 @@
                     <input type="checkbox" id="config-live-view-toggle" checked>
                     Live View
                 </label>
+                <label class="toggle" title="Click the video to aim there, drag to pan, scroll to zoom toward the cursor">
+                    <input type="checkbox" id="pointer-control-toggle" checked>
+                    Point and drag
+                </label>
+                <label class="toolbar-select">
+                    Click video to
+                    <select id="click-action-select">
+                        <option value="aim">Aim there</option>
+                        <option value="lock">Lock on spot</option>
+                    </select>
+                </label>
+                <button class="btn btn-sm" id="release-lock-btn" hidden><i class="fas fa-unlock"></i> Release lock</button>
                 <label class="toolbar-select">
                     Video backend
                     <select id="stream-backend-select">
@@ -56,6 +68,7 @@
             <div class="video-container">
                 <img id="video-stream" alt="Video Stream" hidden>
                 <p id="video-status" class="video-status" role="status" hidden></p>
+                <div id="aim-marker" class="aim-marker" hidden></div>
                 <div id="offline-overlay" class="offline-overlay active" role="status" aria-live="polite">
                     <div class="overlay-content">
                         <h2 id="overlay-title">CHECKING CONNECTION</h2>
@@ -70,6 +83,7 @@
                     <div class="overlay-card">
                         Y: <span id="att-yaw">0.0</span>° | P: <span id="att-pitch">0.0</span>° | R: <span id="att-roll">0.0</span>°
                     </div>
+                    <div id="lock-badge" class="overlay-card lock-badge" role="status" hidden></div>
                     <div id="recording-badge" class="overlay-card recording-badge" hidden>
                         <i class="fas fa-circle"></i> REC
                     </div>
@@ -135,6 +149,12 @@
                 <p class="control-hint shortcut-hint">
                     Keyboard: <kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> rotate (hold) · <kbd>Space</kbd> stop ·
                     <kbd>C</kbd> center · <kbd>+</kbd>/<kbd>-</kbd> zoom (hold)
+                </p>
+                <p class="control-hint shortcut-hint">
+                    Video (Point and drag on): click to aim there · drag to pan the scene · scroll to zoom toward the cursor
+                </p>
+                <p class="control-hint shortcut-hint">
+                    Point lock (Click video to: Lock on spot): click a spot to keep the gimbal on it while the drone moves · scroll zooms without losing the lock · <kbd>Esc</kbd>, Stop, the joystick, or dragging releases it
                 </p>
             </section>
 
@@ -315,6 +335,36 @@
                     <option value="1280x720">720P</option>
                 </select>
             </div>
+
+            <fieldset class="pointing-settings">
+                <legend>Point and drag</legend>
+                <div class="input-group">
+                    <label for="pointing-hfov-input">Horizontal field of view at 1× (degrees)</label>
+                    <input type="number" id="pointing-hfov-input" min="10" max="160" step="0.5" value="81">
+                </div>
+                <div class="input-group">
+                    <label for="pointing-delay-input">Video delay (ms)</label>
+                    <input type="number" id="pointing-delay-input" min="0" max="3000" step="10" value="200">
+                </div>
+                <label class="toggle"><input type="checkbox" id="pointing-invert-yaw"> Invert yaw</label>
+                <label class="toggle"><input type="checkbox" id="pointing-invert-pitch"> Invert pitch</label>
+                <div class="input-group">
+                    <label for="lock-gain-input">Point lock response (speed per degree of error)</label>
+                    <input type="number" id="lock-gain-input" min="0.1" max="20" step="0.1" value="2">
+                </div>
+                <div class="input-group">
+                    <label for="lock-speed-input">Point lock top speed (5-100)</label>
+                    <input type="number" id="lock-speed-input" min="5" max="100" step="5" value="60">
+                </div>
+                <div class="input-group">
+                    <label for="lock-model-select">Point lock target distance</label>
+                    <select id="lock-model-select">
+                        <option value="local">Ground target (default)</option>
+                        <option value="global">Distant target near the horizon</option>
+                    </select>
+                </div>
+                <p class="control-hint">If a click overshoots, lower the field of view; if it falls short, raise it. If the camera turns away from the click, invert that axis. If a point lock oscillates around the spot, lower the response; if it lags behind, raise it.</p>
+            </fieldset>
 
             <div class="danger-zone">
                 <span class="danger-label">DANGER ZONE</span>
