@@ -7,7 +7,7 @@ name = "siyi-sdk"
 version = "0.6.0"
 description = "Async Python SDK for the SIYI A8 Mini gimbal camera"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "SIYI SDK Contributors" }]
 classifiers = [
