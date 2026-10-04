@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `siyi_sdk.tracking` (extra `tracking`): `PointLock` follows a fixed spot in the
+  scene through camera motion using whole-frame optical flow, with `local` and
+  `global` motion models; `GimbalPointLock` steers the gimbal with 0x07 speed
+  commands through a PI `RateController` to keep that spot centred. See
+  `docs/tracking.md`.
+- Web dashboard: point lock (click to lock a spot, server-drawn reticle, release
+  controls, tuning in Settings), click-to-aim, drag-to-pan, and scroll-to-zoom
+  toward the cursor using absolute angle targets (0x0E).
+- `examples/point_lock.py` and `examples/tracker_demo.py` (compare point lock
+  with OpenCV trackers on video files or RTSP).
+- Point lock compensates for video delay: frames are matched to the attitude at
+  capture time (`AttitudeHistory`), the spot's angular velocity is fitted over
+  recent frames, and a 50 Hz loop steers on the predicted direction, either with
+  0x0E angle targets (`control="angle"`, dashboard default) or a PI loop with
+  feedforward on 0x07 speeds. The video delay is re-estimated while locked.
+- `calibrate_loop` measures turn rate per 0x07 unit, command delay, video delay,
+  attitude directions and field of view; the dashboard runs it from Settings.
+
+### Changed (point lock)
+
+- `LockGains` are in physical units (deg/s per degree) and derived from a
+  measured `LoopModel` with `LockGains.for_model`; `max_step` is gone.
+- The dashboard requests the attitude stream at 50 Hz and encodes the browser
+  preview in the background, at most 1280 pixels wide, so it can't delay tracking.
+
 Checked against the A8 mini firmware pack v0.4.9 (gimbal v0.4.9, camera v0.3.7)
 by disassembling the camera's SDK handlers.
 

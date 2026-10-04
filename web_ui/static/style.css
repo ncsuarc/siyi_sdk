@@ -528,6 +528,8 @@ input:focus {
 .recording-badge { color: var(--danger); }
 .lock-badge { color: var(--success); font-variant-numeric: tabular-nums; }
 .lock-badge[hidden], #release-lock-btn[hidden] { display: none; }
+.calibration { display: grid; gap: 6px; margin-top: 4px; }
+.calibration .control-hint { font-variant-numeric: tabular-nums; }
 .lock-badge.searching { color: var(--warning); }
 .video-container img.pointer-aim { cursor: crosshair; touch-action: none; user-select: none; }
 .video-container img.pointer-aim.dragging { cursor: grabbing; }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -105,3 +106,44 @@ def test_overlay_draws_marker_or_arrow(on_screen) -> None:
     blank = np.zeros_like(image)
     draw_lock(blank, LockStatus(LockState.IDLE))
     assert not blank.any()
+
+
+async def test_lock_uses_angle_targets_when_attitude_is_streaming(camera, ground) -> None:
+    angles: list[tuple[float, float]] = []
+
+    async def set_attitude_nowait(yaw: float, pitch: float) -> None:
+        angles.append((yaw, pitch))
+
+    camera.client.set_attitude_nowait = set_attitude_nowait
+    now = time.monotonic()
+    for i in range(40):  # half a second of a still gimbal at 80 Hz
+        camera.attitude_history.add(now - 0.5 + i / 80, 0.0, 0.0)
+    snapshot = await camera.start_lock(0.25, 0.0)
+    assert snapshot["state"] == "locked"
+    assert camera.point_lock.control == "angle" and camera.point_lock.compensated
+    for _ in range(3):
+        camera.attitude_history.add(time.monotonic(), 0.0, 0.0)
+        await camera._on_frame(frame(ground[:, :1280].copy(), time.monotonic()))
+        await asyncio.sleep(0.05)  # let the 50 Hz control loop run
+    assert angles and angles[-1][0] > 5  # spot is a quarter-frame right: aim right
+    assert camera.lock_snapshot()["compensated"] is True
+    await camera.release_lock()
+
+
+async def test_calibration_needs_live_video(camera) -> None:
+    from fastapi import HTTPException
+
+    camera.latest_image = None
+    with pytest.raises(HTTPException):
+        await camera.calibrate()
+
+
+def test_pointing_config_rejects_zero_turn_rate() -> None:
+    from pydantic import ValidationError
+
+    from web_ui.server import PointingConfigRequest
+
+    base = {"hfov_deg": 81, "yaw_sign": 1, "pitch_sign": 1, "video_delay_ms": 200}
+    PointingConfigRequest(**base)  # settings saved by older dashboards still load
+    with pytest.raises(ValidationError):
+        PointingConfigRequest(**base, deg_per_unit_yaw=0.0)

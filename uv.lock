@@ -1103,6 +1103,10 @@ tracking = [
     { name = "opencv-python" },
 ]
 web = [
+    { name = "aiortsp" },
+    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "av", version = "19.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "fastapi" },
     { name = "numpy" },
     { name = "opencv-python" },
@@ -1127,7 +1131,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiortsp", marker = "extra == 'stream-aiortsp'", specifier = ">=1.4,<2" },
+    { name = "aiortsp", marker = "extra == 'web'", specifier = ">=1.4,<2" },
     { name = "av", marker = "extra == 'stream-aiortsp'", specifier = ">=14" },
+    { name = "av", marker = "extra == 'web'", specifier = ">=14" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "numpy", marker = "extra == 'stream'", specifier = ">=1.21,<2.3" },
     { name = "numpy", marker = "extra == 'stream-aiortsp'", specifier = ">=1.21,<2.3" },

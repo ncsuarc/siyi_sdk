@@ -494,6 +494,7 @@ class SiyiApp {
                     '/api/camera/photo': 'Photo', '/api/camera/zoom': 'Zoom velocity',
                     '/api/camera/encoding': 'Encoding settings', '/api/gimbal/look': 'Point',
                     '/api/track/lock': 'Point lock', '/api/track/release': 'Release lock',
+                    '/api/track/calibrate': 'Measure loop timing',
                     '/api/camera/zoom_to': 'Zoom to'
                 };
                 let suffix = '';
@@ -834,6 +835,7 @@ class SiyiApp {
         clickAction.value = store.get('clickAction') === 'lock' ? 'lock' : 'aim';
         clickAction.addEventListener('change', () => store.set('clickAction', clickAction.value));
         document.getElementById('release-lock-btn').addEventListener('click', () => this.releaseLock());
+        document.getElementById('calibrate-loop-btn').addEventListener('click', () => this.calibrateLoop());
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape' && this.lockState !== 'idle' &&
                 !document.getElementById('config-modal').classList.contains('active')) {
@@ -958,8 +960,9 @@ class SiyiApp {
         badge.classList.toggle('searching', state === 'searching');
         if (state !== 'idle') {
             const [yaw, pitch] = lock.error_deg ?? [0, 0];
+            const mode = lock.compensated ? (lock.control === 'angle' ? 'angle' : 'speed') : 'uncompensated';
             badge.textContent = state === 'locked'
-                ? `LOCK ${lock.score.toFixed(2)} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`
+                ? `LOCK ${lock.score.toFixed(2)} · ${mode} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`
                 : 'LOCK SEARCHING · holding still';
         }
         // The server drops a lock it can't recover or that manual control replaced.
@@ -1036,7 +1039,8 @@ class SiyiApp {
             delay: document.getElementById('pointing-delay-input'),
             yaw: document.getElementById('pointing-invert-yaw'),
             pitch: document.getElementById('pointing-invert-pitch'),
-            gain: document.getElementById('lock-gain-input'),
+            control: document.getElementById('lock-control-select'),
+            response: document.getElementById('lock-response-input'),
             speed: document.getElementById('lock-speed-input'),
             model: document.getElementById('lock-model-select'),
         };
@@ -1048,8 +1052,17 @@ class SiyiApp {
         fields.delay.value = config.video_delay_ms;
         fields.yaw.checked = config.yaw_sign === -1;
         fields.pitch.checked = config.pitch_sign === -1;
-        fields.gain.value = config.lock_gain ?? 2;
-        fields.speed.value = config.lock_max_speed ?? 60;
+        this.pointingConfig = config;
+        fields.control.value = config.lock_control ?? 'angle';
+        fields.response.value = config.lock_response ?? 1;
+        fields.speed.value = config.lock_max_speed ?? 100;
+        const status = document.getElementById('calibration-status');
+        if (config.calibrated) {
+            const rate = v => `${Math.abs(v).toFixed(2)}`;
+            status.textContent = `Measured: ${rate(config.deg_per_unit_yaw)} / ${rate(config.deg_per_unit_pitch)} °/s per speed unit (yaw / pitch), ` +
+                `command delay ${Math.round(config.command_delay_ms)} ms, video delay ${Math.round(config.frame_delay_ms)} ms, ` +
+                `field of view ${config.hfov_deg}°.`;
+        }
         fields.model.value = config.lock_model ?? 'local';
     }
 
@@ -1068,15 +1081,41 @@ class SiyiApp {
         }
     }
 
+    async calibrateLoop() {
+        const confirmed = await confirmAction(
+            'The gimbal will turn about 20° right and back, then 20° up and back, over about 8 seconds. ' +
+            'Point the camera at a textured, still scene and keep the aircraft steady.',
+            {title: 'Measure loop timing', confirmLabel: 'Measure'});
+        if (!confirmed) return;
+        const button = document.getElementById('calibrate-loop-btn');
+        const status = document.getElementById('calibration-status');
+        button.disabled = true;
+        status.textContent = 'Measuring… keep the camera steady.';
+        try {
+            const result = await this.request('/api/track/calibrate', {method: 'POST'}, {}, 30000);
+            store.set('pointingConfig', JSON.stringify(result.config));
+            this.showPointingConfig(result.config);
+            if (result.notes.length) status.textContent += ` Warning: ${result.notes.join(' ')}`;
+            this.notify('Loop timing measured and saved.');
+        } catch (e) {
+            status.textContent = `Measurement failed: ${e.message}`;
+            this.notify(`Measurement failed: ${e.message}`, true);
+        } finally {
+            button.disabled = false;
+        }
+    }
+
     async savePointingConfig() {
         const fields = this.pointingFields();
         const config = await this.request('/api/pointing/config', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
+                // Keep measured values (turn rate, delays) that have no input of their own.
+                ...(this.pointingConfig ?? {}),
                 hfov_deg: Number(fields.hfov.value), video_delay_ms: Number(fields.delay.value),
                 yaw_sign: fields.yaw.checked ? -1 : 1, pitch_sign: fields.pitch.checked ? -1 : 1,
-                lock_gain: Number(fields.gain.value), lock_max_speed: Math.round(Number(fields.speed.value)),
-                lock_model: fields.model.value,
+                lock_control: fields.control.value, lock_response: Number(fields.response.value),
+                lock_max_speed: Math.round(Number(fields.speed.value)), lock_model: fields.model.value,
             })
         });
         store.set('pointingConfig', JSON.stringify(config));

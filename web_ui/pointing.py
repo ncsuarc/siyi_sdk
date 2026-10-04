@@ -13,10 +13,11 @@ stabilized gimbal holds. A8 Mini digital zoom narrows the field of view as
 
 from __future__ import annotations
 
-import bisect
 import math
-from collections import deque
 from dataclasses import dataclass
+
+# Moved to the SDK; re-exported for existing imports.
+from siyi_sdk.tracking.attitude import AttitudeHistory  # noqa: F401
 
 # A8 Mini limits from protocol commands 0x0E and 0x41.
 YAW_LIMITS = (-135.0, 135.0)
@@ -34,10 +35,17 @@ class PointingConfig:
     pitch_sign: int = 1
     # Time between the camera seeing a scene and the browser showing it.
     video_delay_ms: float = 200.0
-    # Point lock: rotation speed units per degree of error, top speed, motion model.
-    lock_gain: float = 2.0
-    lock_max_speed: int = 60
+    # Point lock. Measured by "Measure loop timing" (siyi_sdk.tracking.calibrate):
+    # turn rate per 0x07 unit, command delay, and capture-to-server frame delay.
+    lock_control: str = "angle"  # "angle" (0x0E targets) or "rate" (0x07 speeds)
+    lock_response: float = 1.0  # multiplies the gain derived from the measured delays
+    lock_max_speed: int = 100
     lock_model: str = "local"
+    deg_per_unit_yaw: float = 1.0
+    deg_per_unit_pitch: float = 1.0
+    command_delay_ms: float = 60.0
+    frame_delay_ms: float = 200.0
+    calibrated: bool = False
 
 
 def _ray(x: float, y: float, aspect: float, zoom: float, hfov_deg: float) -> tuple[float, float]:
@@ -95,36 +103,3 @@ def clamp_attitude(yaw: float, pitch: float) -> tuple[float, float]:
         min(max(yaw, YAW_LIMITS[0]), YAW_LIMITS[1]),
         min(max(pitch, PITCH_LIMITS[0]), PITCH_LIMITS[1]),
     )
-
-
-class AttitudeHistory:
-    """Recent attitude samples, so a click can use the pose its video frame showed."""
-
-    def __init__(self, seconds: float = 3.0) -> None:
-        """Keep samples from the last ``seconds``."""
-        self.seconds = seconds
-        self.samples: deque[tuple[float, float, float]] = deque()
-
-    def add(self, t: float, yaw: float, pitch: float) -> None:
-        """Record a sample taken at monotonic time ``t``."""
-        self.samples.append((t, yaw, pitch))
-        while self.samples and self.samples[0][0] < t - self.seconds:
-            self.samples.popleft()
-
-    def clear(self) -> None:
-        """Forget all samples."""
-        self.samples.clear()
-
-    def at(self, t: float) -> tuple[float, float] | None:
-        """Linearly interpolated (yaw, pitch) at time t, clamped to the stored range."""
-        if not self.samples:
-            return None
-        times = [s[0] for s in self.samples]
-        i = bisect.bisect_left(times, t)
-        if i == 0:
-            return self.samples[0][1:]
-        if i == len(times):
-            return self.samples[-1][1:]
-        (t0, y0, p0), (t1, y1, p1) = self.samples[i - 1], self.samples[i]
-        k = (t - t0) / (t1 - t0) if t1 > t0 else 1.0
-        return y0 + (y1 - y0) * k, p0 + (p1 - p0) * k

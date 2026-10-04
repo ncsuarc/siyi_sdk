@@ -20,5 +20,7 @@ Install one or more of `stream-opencv`, `stream-gst`, and `stream-aiortsp`. Auto
 - `rtsp_gstreamer.py`: view the same stream with GStreamer.
 - `rtsp_record.py`: record the main stream locally.
 - `rtsp_with_control.py`: gimbal control alongside live video.
+- `point_lock.py`: lock the spot at the image centre and steer the gimbal to keep it there while the aircraft moves (needs the `tracking` and `stream-opencv` extras). See `docs/tracking.md`.
+- `tracker_demo.py`: draw a box on a video file, camera, or RTSP stream and compare OpenCV trackers (NanoTrack, ViT, MIL, and KCF/CSRT with `opencv-contrib-python`). `-t point` locks a fixed spot in a static scene while the camera moves, using whole-frame optical flow, and shows an arrow when the spot is off-screen. Run `--download` once for the NanoTrack/ViT models; `--no-display --roi x,y,w,h` prints a timing benchmark, for example on a Raspberry Pi.
 
 All RTSP examples use `rtsp://192.168.144.25:8554/main.264`.

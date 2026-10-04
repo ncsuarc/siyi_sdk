@@ -20,7 +20,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from siyi_sdk import (
     SIYIClient,
@@ -49,7 +49,10 @@ from web_ui.pointing import (
     AttitudeHistory, PointingConfig, center_for, clamp_attitude, screen_to_world,
 )
 from web_ui.lock_overlay import draw_lock
-from siyi_sdk.tracking import GimbalPointLock, LockGains, LockState
+from siyi_sdk.tracking import (
+    CalibrationError, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
+    calibrate_loop,
+)
 
 # Setup logging
 configure_logging(level="INFO")
@@ -109,6 +112,9 @@ class CameraState:
         self.latest_image = None
         self.lock_ms: Optional[float] = None
         self.lock_last_command = (0, 0)
+        self.calibration_recorder = FrameMotionRecorder()
+        self.calibrating = False
+        self.preview_task: Optional[asyncio.Task] = None
 
     async def initialize(self, ip: str):
         async with self.lock:
@@ -173,7 +179,7 @@ class CameraState:
                             # Telemetry support must not gate camera connectivity.
                             try:
                                 await asyncio.wait_for(
-                                    self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ20),
+                                    self.client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ50),
                                     timeout=2.0
                                 )
                             except Exception as e:
@@ -225,6 +231,7 @@ class CameraState:
         received = time.monotonic()
         image = frame.frame
         self.latest_image = image
+        self.calibration_recorder.add(image, frame.timestamp)
         lock = self.point_lock
         if lock is not None and lock.active:
             started = time.perf_counter()
@@ -240,8 +247,16 @@ class CameraState:
                 else:
                     image = image.copy()  # keep the marker out of the frame the tracker reads
                     draw_lock(image, status)
-        # Encode to JPEG for MJPEG stream
+        # The browser preview is encoded in the background so it never holds up
+        # the next frame's tracking; if an encode is still running, skip this one.
+        if self.preview_task is None or self.preview_task.done():
+            self.preview_task = asyncio.create_task(self._encode_preview(image, received))
+
+    async def _encode_preview(self, image, received):
         started = time.perf_counter()
+        height, width = image.shape[:2]
+        if width > 1280:  # the preview never needs more; JPEG cost grows with pixels
+            image = cv2.resize(image, (1280, round(height * 1280 / width)), interpolation=cv2.INTER_AREA)
         success, buffer = await asyncio.to_thread(
             cv2.imencode, '.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80]
         )
@@ -381,15 +396,41 @@ class CameraState:
         except HTTPException:
             pass  # camera offline; the watchdog and reconnect logic handle it
 
+    async def _send_lock_angle(self, yaw: float, pitch: float) -> None:
+        if self.client and self.is_connected:
+            await self.client.set_attitude_nowait(yaw, pitch)
+
+    def loop_model(self) -> LoopModel:
+        cfg = self.pointing
+        return LoopModel(
+            deg_per_unit=(cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch),
+            command_delay_s=cfg.command_delay_ms / 1000,
+            video_delay_s=cfg.frame_delay_ms / 1000,
+        )
+
     async def start_lock(self, x: float, y: float) -> dict:
         """Lock the spot at normalized offset (x, y) from the centre of the latest frame."""
         image = self.latest_image
         if image is None or not self.is_connected:
             raise HTTPException(status_code=503, detail="Point lock needs live video from a connected camera")
+        if self.calibrating:
+            raise HTTPException(status_code=409, detail="Wait for the loop measurement to finish")
         cfg = self.pointing
-        gains = LockGains(kp=cfg.lock_gain, max_speed=cfg.lock_max_speed)
-        lock = GimbalPointLock(send=self._send_lock_rate, hfov_deg=cfg.hfov_deg,
-                               model=cfg.lock_model, gains=gains)
+        loop = self.loop_model()
+        # With attitude available the delay is compensated, so the gain follows the command delay.
+        compensated = self.attitude_history.latest() is not None
+        gains = LockGains.for_model(loop, compensated=compensated)
+        gains.kp *= cfg.lock_response
+        gains.ki *= cfg.lock_response ** 2
+        gains.max_speed = cfg.lock_max_speed
+        lock = GimbalPointLock(
+            send=self._send_lock_rate, send_angle=self._send_lock_angle,
+            hfov_deg=cfg.hfov_deg, model=cfg.lock_model, loop=loop, gains=gains,
+            attitude=self.attitude_history if compensated else None,
+            attitude_signs=(cfg.yaw_sign, cfg.pitch_sign),
+            control=cfg.lock_control if compensated else "rate",
+            trust_video_delay=cfg.calibrated,
+        )
         height, width = image.shape[:2]
         lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
         if self.point_lock is not None:
@@ -414,9 +455,45 @@ class CameraState:
             "state": s.state.value, "score": round(s.score, 2), "on_screen": s.on_screen,
             "x": round(s.x / s.width - 0.5, 4) if s.width else 0.0,
             "y": round(s.y / s.height - 0.5, 4) if s.height else 0.0,
-            "error_deg": [round(v, 1) for v in s.error_deg], "command": list(s.command),
-            "update_ms": self.lock_ms,
+            "error_deg": [round(v, 2) for v in s.error_deg], "command": list(s.command),
+            "update_ms": self.lock_ms, "compensated": s.compensated, "control": lock.control,
+            "target_rate_deg_s": [round(v, 1) for v in s.target_rate_deg_s],
         }
+
+    async def calibrate(self) -> dict:
+        """Measure turn rate, delays, axis directions and field of view; store them."""
+        if not self.client or not self.is_connected or self.latest_image is None:
+            raise HTTPException(status_code=503, detail="Measuring needs live video from a connected camera")
+        if self.calibrating:
+            raise HTTPException(status_code=409, detail="A measurement is already running")
+        await self.release_lock("Point lock released for loop measurement")
+        client = self.client
+        self.calibrating = True
+        try:
+            result = await calibrate_loop(
+                client.rotate_nowait, self.attitude_history, self.calibration_recorder,
+                hfov_deg=self.pointing.hfov_deg, zoom=self.zoom or 1.0,
+            )
+        except CalibrationError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        finally:
+            self.calibrating = False
+            self.calibration_recorder.stop()
+            for _ in range(3):
+                try:
+                    await client.rotate_nowait(0, 0)
+                except Exception:
+                    pass
+        cfg = self.pointing
+        model = result.model
+        cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch = (round(v, 4) for v in model.deg_per_unit)
+        cfg.command_delay_ms = round(model.command_delay_s * 1000, 1)
+        cfg.frame_delay_ms = round(model.video_delay_s * 1000, 1)
+        cfg.yaw_sign, cfg.pitch_sign = result.attitude_signs
+        cfg.hfov_deg = round(result.hfov_deg, 1)
+        cfg.calibrated = True
+        return {"config": vars(cfg), "notes": result.notes,
+                "fit_error_deg": round(result.yaw.fit_error_deg, 2)}
 
     async def refresh_zoom(self):
         """Read the zoom level and range; pointer math needs the current field of view."""
@@ -640,9 +717,23 @@ class PointingConfigRequest(BaseModel):
     pitch_sign: Literal[-1, 1]
     video_delay_ms: float = Field(ge=0, le=3000)
     # Defaults keep settings saved by older dashboards valid.
-    lock_gain: float = Field(default=2.0, gt=0, le=20)
-    lock_max_speed: int = Field(default=60, ge=5, le=100)
+    lock_control: Literal["angle", "rate"] = "angle"
+    lock_response: float = Field(default=1.0, gt=0.1, le=5)
+    lock_max_speed: int = Field(default=100, ge=5, le=100)
     lock_model: Literal["local", "global"] = "local"
+    # Signed: a negative rate means +speed turns the picture left/down.
+    deg_per_unit_yaw: float = Field(default=1.0, ge=-20, le=20)
+    deg_per_unit_pitch: float = Field(default=1.0, ge=-20, le=20)
+
+    @field_validator("deg_per_unit_yaw", "deg_per_unit_pitch")
+    @classmethod
+    def _nonzero_rate(cls, value: float) -> float:
+        if abs(value) < 0.05:
+            raise ValueError("turn rate per unit must be at least 0.05 deg/s in magnitude")
+        return value
+    command_delay_ms: float = Field(default=60.0, ge=0, le=1000)
+    frame_delay_ms: float = Field(default=200.0, ge=0, le=2000)
+    calibrated: bool = False
 
 class LockRequest(BaseModel):
     # Normalized offsets from the image centre: -0.5 = left/top edge, 0.5 = right/bottom.
@@ -735,6 +826,11 @@ async def set_pointing_config(req: PointingConfigRequest):
 @app.post("/api/track/lock")
 async def track_lock(req: LockRequest):
     return await state.start_lock(req.x, req.y)
+
+@app.post("/api/track/calibrate")
+async def track_calibrate():
+    """Turn the gimbal briefly on each axis to measure the loop (moves the camera)."""
+    return await state.calibrate()
 
 @app.post("/api/track/release")
 async def track_release():

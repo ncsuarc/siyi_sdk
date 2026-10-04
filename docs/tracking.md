@@ -1,20 +1,37 @@
 # Point lock
 
-Point lock keeps the gimbal pointed at a fixed spot in the scene while the aircraft moves. Install it with `pip install "siyi-sdk[tracking]"` (OpenCV and NumPy). It runs on the CPU; on a 1280-pixel-wide frame it takes about 2 ms per frame on a desktop.
+Point lock keeps the gimbal pointed at a fixed spot in the scene while the aircraft moves. Install it with `pip install "siyi-sdk[tracking]"` (OpenCV and NumPy). It runs on the CPU; on a 1280-pixel-wide frame the tracker takes about 2 ms per frame on a desktop.
 
 ## How it works
 
 - `PointLock` follows the spot by tracking a few hundred features across the whole frame. Features on moving objects are discarded, so passing cars do not drag the spot with them. The spot itself can be featureless, briefly covered, or off-screen.
-- `GimbalPointLock` turns the spot's offset from the image centre into an angle and sends rotation-speed commands (`0x07`) through a PI controller. It uses speed rather than angle targets because the A8 Mini reports yaw relative to the aircraft body, and that reading goes stale if the aircraft turns during the video delay.
-- Use Lock gimbal mode. The gimbal then cancels aircraft rotation itself, and the loop only has to follow the slower drift caused by the aircraft moving.
+- `GimbalPointLock` steers the gimbal to keep the spot centred. Use Lock gimbal mode, so the gimbal itself cancels aircraft rotation.
+
+The hard part is delay. A decoded frame shows the scene as it was 150-300 ms ago (encoding, RTSP, decoding), and a controller that steers on that old picture has to be slow or it oscillates. The attitude stream (`0x25`, up to 100 Hz) arrives almost immediately, so `GimbalPointLock` combines the two:
+
+1. Each frame gives the spot's offset from the image centre at the moment the frame was captured (arrival time minus `LoopModel.video_delay_s`).
+2. Adding the gimbal attitude at that same moment, from `AttitudeHistory`, gives the spot's direction in gimbal angles. That direction doesn't depend on where the gimbal has turned since.
+3. A straight-line fit over the last 0.4 s of these directions gives the spot's angular velocity (a ground spot drifts across the sky as the aircraft flies past).
+4. A 50 Hz control loop predicts the spot's direction now, compares it with the newest attitude sample, and acts:
+   - `control="angle"`: sends the predicted direction as a `0x0E` angle target and lets the gimbal's own position controller do the fast work. There is nothing to tune.
+   - `control="rate"`: PI on the predicted error plus velocity feedforward, sent as `0x07` speeds. Gains follow from the measured delay (`LockGains.for_model`).
+
+Without an `AttitudeHistory`, the lock falls back to a slower PI loop on the raw, delayed image error, once per frame.
 
 ```python
 from siyi_sdk import connect_udp
-from siyi_sdk.tracking import GimbalPointLock, LockGains
+from siyi_sdk.models import DataStreamFreq, GimbalDataType
+from siyi_sdk.tracking import AttitudeHistory, GimbalPointLock, LoopModel
 
 client = await connect_udp()
+history = AttitudeHistory()
+history.attach(client)
+await client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ50)
+
+loop = LoopModel(deg_per_unit=(1.0, 1.0), command_delay_s=0.1, video_delay_s=0.2)
+lock = GimbalPointLock(client, attitude=history, loop=loop, control="angle")
+
 stream = client.create_stream()
-lock = GimbalPointLock(client, hfov_deg=81.0, gains=LockGains(kp=2.0))
 
 async def on_frame(frame):
     if lock.active:
@@ -24,10 +41,44 @@ stream.on_frame(on_frame)
 await stream.start()
 lock.lock(stream.last_frame.frame, x=900, y=400)  # pixel to hold
 ...
-await lock.release()  # stops the gimbal
+await lock.release()
 ```
 
-See `examples/point_lock.py` for a complete script and `examples/tracker_demo.py -t point` to try the tracker on a recorded video.
+`examples/point_lock.py` is a complete script; `examples/tracker_demo.py -t point` tries the tracker on a recorded video.
+
+## Measuring the loop
+
+`calibrate_loop` turns the gimbal about 20 degrees on each axis and back while recording the attitude stream and how far the picture shifts between frames (phase correlation). It returns:
+
+| Measured | How |
+| --- | --- |
+| Turn rate per `0x07` unit, per axis | Slope of the attitude while turning |
+| Command delay | Where that slope meets the starting attitude (dead time plus motor lag) |
+| Video delay | Time shift that best lines up picture motion with attitude |
+| Attitude direction convention | Sign of that fit |
+| Field of view | Scale of that fit |
+
+Point the camera at a textured, still scene. The dashboard runs this from **Settings → Point and drag → Measure loop timing** and saves the results.
+
+## Robustness
+
+The video delay matters most. If it is set too long, the attitude paired with each frame is from too early; while the gimbal turns, that makes the fixed spot appear to move, and the velocity prediction feeds that back. In simulation, a delay 60 ms too long made both modes run away. So:
+
+- While locked, the lock re-estimates the video delay every few frames: it tries delays around the current one and keeps the one under which the spot's direction is most nearly a straight line in time. This only happens when the gimbal has turned enough to tell delays apart.
+- Until that estimate has confirmed the delay, a 20% shorter delay is used, because too short only slows the loop. Pass `trust_video_delay=True` when the delay was measured.
+- The spot's estimated velocity is limited to 30 degrees per second.
+
+A 25% error in the turn rate costs little: angle mode doesn't use it, and the rate loop's integral absorbs it.
+
+## What the tests cover
+
+`tests/tracking/sim.py` simulates a gimbal (command delay, motor lag, speed and angle modes, 50 Hz attitude) and a camera (30 fps, delivered late) over a textured scene while the aircraft drifts. `tests/tracking/test_closed_loop.py` checks, in real time against that simulation, that:
+
+- both modes settle within 1 degree in 1.2 s from an 11 degree offset and track a spot drifting at 8.5 degrees per second;
+- the lock recovers from a video delay set 60 ms too short or too long;
+- calibration recovers the simulated turn rate, delays, axis directions and field of view.
+
+The simulation is a model, not the A8 Mini. How the real gimbal responds to a 50 Hz stream of `0x0E` targets, its real delays, attitude noise and packet loss are not covered; measure on hardware and compare the two control modes there.
 
 ## Choosing the motion model
 
@@ -36,13 +87,8 @@ See `examples/point_lock.py` for a complete script and `examples/tracker_demo.py
 | `local` (default) | Ground targets seen from above or at an angle, including among buildings | Moves the spot with the 40 features nearest it, which sit at a similar depth |
 | `global` | Distant targets near the horizon with foreground in front | The nearest on-screen features are then much closer than the target; the whole-frame motion fits the distant scene better |
 
-## Tuning
-
-- `LockGains.kp` is speed units per degree of error (default 2). The camera does not document degrees per second per unit. Raise `kp` until the camera overshoots the spot, then halve it. In a simulation with 0.2 s of video delay, `kp=2` was stable for gimbals turning 0.5 to 2 degrees per second per unit, and `kp=4` oscillated at 2.
-- `hfov_deg` is the horizontal field of view at 1x. Pass the current digital zoom to `update()`, since zooming narrows the view.
-- The lock reports `SEARCHING` and holds the gimbal still when it cannot estimate scene motion (for example over sky or water), and releases after `lost_timeout` seconds.
-
 ## Limits
 
 - Accuracy is best while the spot stays near the image centre, which the loop maintains. If the spot stays out of view for many seconds, the estimate drifts.
-- The video must show a static scene around the spot. Point lock does not follow moving objects; use an object tracker such as `cv2.TrackerNano` for those, and do not rely on its score alone to detect loss.
+- The A8 Mini reports yaw relative to the aircraft body. A steady aircraft turn looks like the spot moving and is followed; a sudden yaw shows up as a short pointing error.
+- Point lock does not follow moving objects; use an object tracker such as `cv2.TrackerNano` for those, and do not rely on its score alone to detect loss.

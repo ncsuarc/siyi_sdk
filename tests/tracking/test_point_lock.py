@@ -72,7 +72,7 @@ class Recorder:
 
 async def test_gimbal_lock_steers_toward_the_spot(ground) -> None:
     send = Recorder()
-    lock = GimbalPointLock(send=send, hfov_deg=80, gains=LockGains(kp=2, ki=0, max_step=1000))
+    lock = GimbalPointLock(send=send, hfov_deg=80, gains=LockGains(kp=2, ki=0))
     frame, _ = view(ground, 1000, 600)
     # Lock a spot right of and above centre: the gimbal should turn right and up.
     lock.lock(frame, x=W / 2 + 160, y=H / 2 - 90)
@@ -101,3 +101,10 @@ async def test_gimbal_lock_holds_still_then_releases_when_lost(ground) -> None:
 def test_gimbal_lock_needs_a_way_to_send() -> None:
     with pytest.raises(ValueError):
         GimbalPointLock()
+
+
+def test_angle_control_needs_attitude() -> None:
+    async def send(yaw: float, pitch: float) -> None: ...
+
+    with pytest.raises(ValueError):
+        GimbalPointLock(send=send, send_angle=send, control="angle")

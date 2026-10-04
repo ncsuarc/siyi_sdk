@@ -9,8 +9,9 @@
 ``PointLock`` follows a fixed spot in the scene while the camera moves;
 ``GimbalPointLock`` uses it to keep the gimbal pointed at that spot. Both need
 OpenCV and NumPy (``pip install 'siyi-sdk[tracking]'``) and load on first use.
-The rate controller (``LockGains``, ``RateController``, ``pixel_error_deg``)
-has no such dependency.
+The controller (``LockGains``, ``LoopModel``, ``RateController``,
+``pixel_error_deg``) and ``AttitudeHistory`` have no such dependency.
+``calibrate_loop`` measures the loop so gains can be set from real delays.
 """
 
 from __future__ import annotations
@@ -18,9 +19,14 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-from siyi_sdk.tracking.control import LockGains, RateController, pixel_error_deg
+from siyi_sdk.tracking.attitude import AttitudeHistory
+from siyi_sdk.tracking.control import LockGains, LoopModel, RateController, pixel_error_deg
 
 _LAZY = {
+    "CalibrationError": "siyi_sdk.tracking.calibrate",
+    "FrameMotionRecorder": "siyi_sdk.tracking.calibrate",
+    "LoopCalibration": "siyi_sdk.tracking.calibrate",
+    "calibrate_loop": "siyi_sdk.tracking.calibrate",
     "GimbalPointLock": "siyi_sdk.tracking.gimbal",
     "LockState": "siyi_sdk.tracking.gimbal",
     "LockStatus": "siyi_sdk.tracking.gimbal",
@@ -44,12 +50,18 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - dynamic lazy re-exports
 
 
 __all__ = [
+    "AttitudeHistory",
+    "CalibrationError",
+    "FrameMotionRecorder",
     "GimbalPointLock",
     "LockGains",
     "LockState",
     "LockStatus",
+    "LoopCalibration",
+    "LoopModel",
     "PointLock",
     "PointModel",
     "RateController",
+    "calibrate_loop",
     "pixel_error_deg",
 ]

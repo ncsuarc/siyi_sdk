@@ -34,7 +34,7 @@ stream         = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
 stream-opencv  = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
 stream-gst     = ["numpy>=1.21,<2.3", "PyGObject>=3.42"]
 stream-aiortsp = ["numpy>=1.21,<2.3", "aiortsp>=1.4,<2", "av>=14"]
-web            = ["numpy>=1.21,<2.3", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5"]
+web            = ["numpy>=1.21,<2.3", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5", "aiortsp>=1.4,<2", "av>=14"]
 tracking       = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
 
 [dependency-groups]

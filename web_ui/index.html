@@ -349,12 +349,19 @@
                 <label class="toggle"><input type="checkbox" id="pointing-invert-yaw"> Invert yaw</label>
                 <label class="toggle"><input type="checkbox" id="pointing-invert-pitch"> Invert pitch</label>
                 <div class="input-group">
-                    <label for="lock-gain-input">Point lock response (speed per degree of error)</label>
-                    <input type="number" id="lock-gain-input" min="0.1" max="20" step="0.1" value="2">
+                    <label for="lock-control-select">Point lock steering</label>
+                    <select id="lock-control-select">
+                        <option value="angle">Angle targets (gimbal's own controller; fastest)</option>
+                        <option value="rate">Speed commands (our PI controller)</option>
+                    </select>
                 </div>
                 <div class="input-group">
-                    <label for="lock-speed-input">Point lock top speed (5-100)</label>
-                    <input type="number" id="lock-speed-input" min="5" max="100" step="5" value="60">
+                    <label for="lock-response-input">Point lock response (1 = tuned from measured delays)</label>
+                    <input type="number" id="lock-response-input" min="0.2" max="5" step="0.1" value="1">
+                </div>
+                <div class="input-group">
+                    <label for="lock-speed-input">Point lock top speed, speed commands only (5-100)</label>
+                    <input type="number" id="lock-speed-input" min="5" max="100" step="5" value="100">
                 </div>
                 <div class="input-group">
                     <label for="lock-model-select">Point lock target distance</label>
@@ -363,7 +370,11 @@
                         <option value="global">Distant target near the horizon</option>
                     </select>
                 </div>
-                <p class="control-hint">If a click overshoots, lower the field of view; if it falls short, raise it. If the camera turns away from the click, invert that axis. If a point lock oscillates around the spot, lower the response; if it lags behind, raise it.</p>
+                <div class="calibration">
+                    <button class="btn btn-block" id="calibrate-loop-btn" type="button"><i class="fas fa-stopwatch"></i> Measure loop timing</button>
+                    <p id="calibration-status" class="control-hint" role="status" aria-live="polite">Not measured yet. Point the camera at a textured, still scene, then measure: the gimbal turns about 20° on each axis and back.</p>
+                </div>
+                <p class="control-hint">Measuring sets the turn rate, delays, axis directions and field of view for you. If a click still overshoots, lower the field of view; if it falls short, raise it. If a point lock oscillates around the spot, lower the response; if it lags behind, raise it.</p>
             </fieldset>
 
             <div class="danger-zone">
