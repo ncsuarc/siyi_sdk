@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from siyi_sdk import (
     SIYIClient,
+    FirmwareTrackingClient,
     MediaClient,
     SIYIStream,
     StreamConfig,
@@ -50,7 +51,7 @@ from web_ui.pointing import (
 )
 from web_ui.lock_overlay import draw_lock
 from siyi_sdk.tracking import (
-    CalibrationError, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
+    CalibrationError, FirmwarePointLock, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
     calibrate_loop,
 )
 
@@ -82,6 +83,7 @@ class CameraState:
         self.watchdog_task: Optional[asyncio.Task] = None
         self.connection_error: Optional[str] = None
         self.ip: Optional[str] = None
+        self.firmware_version: Optional[FirmwareVersion] = None
         self.live_enabled = True
         self.stop_event = asyncio.Event() # For clean shutdown
         self.status_task: Optional[asyncio.Task] = None
@@ -108,8 +110,12 @@ class CameraState:
         self.gesture: Optional[dict] = None
         self.zoom_refresh_task: Optional[asyncio.Task] = None
         # Point lock steers the gimbal from the video; raw frames are kept to start a lock.
-        self.point_lock: Optional[GimbalPointLock] = None
+        self.point_lock: Optional[GimbalPointLock | FirmwarePointLock] = None
+        self.tracking_lock = asyncio.Lock()
+        self.lock_reason: Optional[str] = None
+        self.lock_exit_confirmed = True
         self.latest_image = None
+        self.latest_image_time = 0.0
         self.lock_ms: Optional[float] = None
         self.lock_last_command = (0, 0)
         self.calibration_recorder = FrameMotionRecorder()
@@ -168,7 +174,7 @@ class CameraState:
                             await asyncio.wait_for(self.client.connect(), timeout=5.0)
                         
                         # Allow all three SDK attempts (2s each) and their backoff.
-                        await asyncio.wait_for(self.client.get_firmware_version(), timeout=8.0)
+                        self.firmware_version = await asyncio.wait_for(self.client.get_firmware_version(), timeout=8.0)
                         self.connection_error = None
                         consecutive_failures = 0
                         
@@ -195,6 +201,7 @@ class CameraState:
                         if consecutive_failures >= 2 and self.is_connected:
                             logger.warning("Camera connection lost (Watchdog)")
                             self.is_connected = False
+                            await self.release_lock("Point lock released: camera disconnected", require_confirmed=False)
                             self.latest_frame = None
                             self.last_frame_time = 0.0
                             if self.stream:
@@ -231,6 +238,7 @@ class CameraState:
         received = time.monotonic()
         image = frame.frame
         self.latest_image = image
+        self.latest_image_time = frame.timestamp
         self.calibration_recorder.add(image, frame.timestamp)
         lock = self.point_lock
         if lock is not None and lock.active:
@@ -409,6 +417,11 @@ class CameraState:
         )
 
     async def start_lock(self, x: float, y: float) -> dict:
+        async with self.tracking_lock:
+            await self._release_lock("Point lock replaced")
+            return await self._start_lock(x, y)
+
+    async def _start_lock(self, x: float, y: float) -> dict:
         """Lock the spot at normalized offset (x, y) from the centre of the latest frame."""
         image = self.latest_image
         if image is None or not self.is_connected:
@@ -416,6 +429,32 @@ class CameraState:
         if self.calibrating:
             raise HTTPException(status_code=409, detail="Wait for the loop measurement to finish")
         cfg = self.pointing
+        height, width = image.shape[:2]
+        if cfg.lock_control == "firmware":
+            version = self.firmware_version
+            if (version is None or FirmwareVersion.decode_word(version.camera) != (0, 3, 7)
+                    or FirmwareVersion.decode_word(version.gimbal) != (0, 4, 9)):
+                self.lock_reason = "Firmware tracking unavailable: requires the inspected camera 0.3.7 / gimbal 0.4.9"
+                raise HTTPException(status_code=503, detail=self.lock_reason)
+            if time.monotonic() - self.latest_image_time >= 0.4:
+                raise HTTPException(status_code=503, detail="Firmware point lock needs a fresh video frame")
+            # Stop any outstanding manual speed command and its delayed stop timer.
+            await self._firmware_emergency_stop()
+            self.motion_deadlines.pop("rotate", None)
+            lock = FirmwarePointLock(
+                FirmwareTrackingClient(self.ip), stop=self._firmware_emergency_stop, model=cfg.lock_model,
+            )
+            self.point_lock = lock
+            self.lock_reason = None
+            try:
+                await lock.start(image, (x + 0.5) * width, (y + 0.5) * height,
+                                 size=max(40, width // 20), timestamp=self.latest_image_time)
+            except Exception as exc:
+                self.lock_reason = lock.reason or f"Firmware tracking unavailable: {str(exc) or type(exc).__name__}"
+                lock.reason = self.lock_reason
+                self.lock_exit_confirmed = lock.exit_confirmed
+                raise HTTPException(status_code=503, detail=self.lock_reason) from exc
+            return self.lock_snapshot()
         loop = self.loop_model()
         # With attitude available the delay is compensated, so the gain follows the command delay.
         compensated = self.attitude_history.latest() is not None
@@ -431,27 +470,45 @@ class CameraState:
             control=cfg.lock_control if compensated else "rate",
             trust_video_delay=cfg.calibrated,
         )
-        height, width = image.shape[:2]
         lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
-        if self.point_lock is not None:
-            await self.point_lock.release()
         self.point_lock = lock
+        self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
         return self.lock_snapshot()
 
-    async def release_lock(self, reason: Optional[str] = None) -> None:
+    async def _firmware_emergency_stop(self) -> None:
+        if self.client:
+            await asyncio.wait_for(self.client.rotate_nowait(0, 0), timeout=0.4)
+
+    async def release_lock(self, reason: Optional[str] = None, *, require_confirmed: bool = True) -> None:
+        async with self.tracking_lock:
+            await self._release_lock(reason, require_confirmed=require_confirmed)
+
+    async def _release_lock(self, reason: Optional[str] = None, *, require_confirmed: bool = True) -> None:
         lock, self.point_lock = self.point_lock, None
-        if lock is not None and lock.active:
+        if isinstance(lock, FirmwarePointLock):
+            await lock.release(reason or "Point lock released")
+            self.lock_reason = lock.reason
+            self.lock_exit_confirmed = lock.exit_confirmed
+        elif lock is not None and lock.active:
             await lock.release()
+            self.lock_reason = reason
             if reason:
                 logger.info(reason)
+        if require_confirmed and not self.lock_exit_confirmed:
+            raise HTTPException(status_code=503, detail=self.lock_reason or "Firmware exit is unconfirmed")
 
     def lock_snapshot(self) -> dict:
         lock = self.point_lock
+        if isinstance(lock, FirmwarePointLock):
+            self.lock_reason = lock.reason
+            self.lock_exit_confirmed = lock.exit_confirmed
         if lock is None or not lock.active:
+            if self.lock_reason or not self.lock_exit_confirmed:
+                return {"state": "idle", "reason": self.lock_reason, "exit_confirmed": self.lock_exit_confirmed}
             return {"state": "idle"}
         s = lock.status
-        return {
+        snapshot = {
             "state": s.state.value, "score": round(s.score, 2), "on_screen": s.on_screen,
             "x": round(s.x / s.width - 0.5, 4) if s.width else 0.0,
             "y": round(s.y / s.height - 0.5, 4) if s.height else 0.0,
@@ -459,6 +516,9 @@ class CameraState:
             "update_ms": self.lock_ms, "compensated": s.compensated, "control": lock.control,
             "target_rate_deg_s": [round(v, 1) for v in s.target_rate_deg_s],
         }
+        if isinstance(lock, FirmwarePointLock):
+            snapshot.update(error_deg=None, command=None, compensated=None, target_rate_deg_s=None)
+        return snapshot
 
     async def calibrate(self) -> dict:
         """Measure turn rate, delays, axis directions and field of view; store them."""
@@ -563,6 +623,7 @@ class CameraState:
             await asyncio.sleep(0.05)
 
     async def shutdown(self):
+        await self.release_lock("Point lock released: camera shutting down", require_confirmed=False)
         for task in list(self.confirmation_tasks.values()):
             task.cancel()
             try:
@@ -591,8 +652,9 @@ class CameraState:
         self.attitude_history.clear()
         self.zoom = self.zoom_max = None
         self.gesture = None
-        self.point_lock = None  # motion is stopped above; no command needed
         self.latest_image = None
+        self.latest_image_time = 0.0
+        self.firmware_version = None
         self.lock_ms = None
         self.status_error = None
         self.rtt_samples.clear()
@@ -654,6 +716,7 @@ class CameraState:
                     self.stream_error = str(e) or "Video stream timed out"
                     raise
             elif not enabled and self.stream.is_running:
+                await self.release_lock("Point lock released: video stopped", require_confirmed=False)
                 logger.info("Stopping backend stream (deep sleep)...")
                 await asyncio.wait_for(self.stream.stop(), timeout=5.0)
                 self.latest_frame = None
@@ -717,7 +780,7 @@ class PointingConfigRequest(BaseModel):
     pitch_sign: Literal[-1, 1]
     video_delay_ms: float = Field(ge=0, le=3000)
     # Defaults keep settings saved by older dashboards valid.
-    lock_control: Literal["angle", "rate"] = "angle"
+    lock_control: Literal["angle", "rate", "firmware"] = "angle"
     lock_response: float = Field(default=1.0, gt=0.1, le=5)
     lock_max_speed: int = Field(default=100, ge=5, le=100)
     lock_model: Literal["local", "global"] = "local"
@@ -778,6 +841,7 @@ async def set_gimbal_mode(req: GimbalModeRequest):
         queue_ms = round((time.perf_counter() - queued) * 1000, 1)
         if state.actions.get("mode", {}).get("status") == "pending":
             raise HTTPException(status_code=409, detail="A mode change is awaiting camera confirmation")
+        await state.release_lock("Point lock released by gimbal mode change")
         try:
             started = time.perf_counter()
             await state.client.capture(modes[req.mode])
@@ -820,7 +884,10 @@ async def get_pointing_config():
 
 @app.post("/api/pointing/config")
 async def set_pointing_config(req: PointingConfigRequest):
-    state.pointing = PointingConfig(**req.model_dump())
+    async with state.tracking_lock:
+        if vars(state.pointing) != req.model_dump():
+            await state._release_lock("Point lock released: steering settings changed")
+        state.pointing = PointingConfig(**req.model_dump())
     return vars(state.pointing)
 
 @app.post("/api/track/lock")
@@ -1122,6 +1189,8 @@ async def run_sdk_command(name: str, request: CommandRequest):
                 "frames": frames, **body}
 
     try:
+        if not command.read_only:
+            await state.release_lock("Point lock released by command explorer")
         result = await execute(state.client, command, request.args)
     except (ValueError, ConfigurationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

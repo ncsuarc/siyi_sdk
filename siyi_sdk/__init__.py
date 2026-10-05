@@ -13,6 +13,7 @@ from typing import Any
 
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.convenience import connect_serial, connect_tcp, connect_udp
+from siyi_sdk.firmware_tracking import FirmwareTrackingClient
 from siyi_sdk.logging_config import configure_logging
 from siyi_sdk.media import MediaClient
 from siyi_sdk.models import MediaDirectory, MediaFile, MediaType
@@ -40,6 +41,7 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - dynamic lazy re-exports
 
 __version__ = "0.6.0"
 __all__ = [
+    "FirmwareTrackingClient",
     "MediaClient",
     "MediaDirectory",
     "MediaFile",

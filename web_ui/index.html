@@ -353,7 +353,9 @@
                     <select id="lock-control-select">
                         <option value="angle">Angle targets (gimbal's own controller; fastest)</option>
                         <option value="rate">Speed commands (our PI controller)</option>
+                        <option value="firmware">SIYI firmware (experimental)</option>
                     </select>
+                    <p id="firmware-lock-hint" class="control-hint" hidden>Fixed scene point; releases immediately if tracking is lost or the point leaves the screen. Manual zoom stays available. Experimental on A8 Mini camera 0.3.7 / gimbal 0.4.9; hardware validation pending.</p>
                 </div>
                 <div class="input-group">
                     <label for="lock-response-input">Point lock response (1 = tuned from measured delays)</label>

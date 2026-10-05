@@ -961,13 +961,15 @@ class SiyiApp {
         if (state !== 'idle') {
             const [yaw, pitch] = lock.error_deg ?? [0, 0];
             const mode = lock.compensated ? (lock.control === 'angle' ? 'angle' : 'speed') : 'uncompensated';
-            badge.textContent = state === 'locked'
+            badge.textContent = lock.control === 'firmware'
+                ? `LOCK ${lock.score.toFixed(2)} · SIYI firmware (experimental)`
+                : state === 'locked'
                 ? `LOCK ${lock.score.toFixed(2)} · ${mode} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`
                 : 'LOCK SEARCHING · holding still';
         }
         // The server drops a lock it can't recover or that manual control replaced.
         if (was !== 'idle' && state === 'idle' && !this.lockReleasing) {
-            this.notify('Point lock ended: the spot was lost or another control took over.', true);
+            this.notify(lock.reason || 'Point lock ended: the spot was lost or another control took over.', true);
         }
     }
 
@@ -1056,6 +1058,8 @@ class SiyiApp {
         fields.control.value = config.lock_control ?? 'angle';
         fields.response.value = config.lock_response ?? 1;
         fields.speed.value = config.lock_max_speed ?? 100;
+        fields.control.onchange = () => this.showLockControlOptions();
+        this.showLockControlOptions();
         const status = document.getElementById('calibration-status');
         if (config.calibrated) {
             const rate = v => `${Math.abs(v).toFixed(2)}`;
@@ -1064,6 +1068,14 @@ class SiyiApp {
                 `field of view ${config.hfov_deg}°.`;
         }
         fields.model.value = config.lock_model ?? 'local';
+    }
+
+    showLockControlOptions() {
+        const fields = this.pointingFields();
+        const firmware = fields.control.value === 'firmware';
+        fields.response.disabled = firmware;
+        fields.speed.disabled = firmware;
+        document.getElementById('firmware-lock-hint').hidden = !firmware;
     }
 
     async loadPointingConfig() {

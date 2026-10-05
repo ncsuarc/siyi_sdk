@@ -622,6 +622,7 @@ button.media-card { font: inherit; color: inherit; text-align: left; padding: 0;
 .legend-roll::before { background: var(--plot-roll); }
 
 /* Config modal and confirm dialog */
+#config-modal .modal-content { max-height: calc(100dvh - 24px); overflow-y: auto; }
 .danger-zone { border-top: 1px solid var(--glass-border); margin: 25px 0 15px; padding-top: 20px; }
 .danger-zone .grid-controls { margin-bottom: 10px; }
 .danger-label { color: var(--danger); font-size: 0.7rem; font-weight: 700; display: block; margin-bottom: 12px; letter-spacing: 1px; }

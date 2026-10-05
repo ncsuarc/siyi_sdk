@@ -37,7 +37,7 @@ class PointingConfig:
     video_delay_ms: float = 200.0
     # Point lock. Measured by "Measure loop timing" (siyi_sdk.tracking.calibrate):
     # turn rate per 0x07 unit, command delay, and capture-to-server frame delay.
-    lock_control: str = "angle"  # "angle" (0x0E targets) or "rate" (0x07 speeds)
+    lock_control: str = "angle"  # angle targets, app rate controller, or experimental firmware
     lock_response: float = 1.0  # multiplies the gain derived from the measured delays
     lock_max_speed: int = 100
     lock_model: str = "local"
