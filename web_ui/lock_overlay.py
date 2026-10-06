@@ -63,3 +63,67 @@ def draw_lock(image: np.ndarray, status: LockStatus) -> None:
         image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, font, (0, 0, 0), thick + 2, cv2.LINE_AA
     )
     cv2.putText(image, label, origin, cv2.FONT_HERSHEY_SIMPLEX, font, color, thick, cv2.LINE_AA)
+
+
+CENTRE = (255, 255, 0)  # cyan: where the camera points
+COMMAND = (255, 0, 255)  # magenta: the target last sent to the firmware
+STALE = (160, 160, 160)
+WARN = (60, 60, 255)
+
+
+def _text(image: np.ndarray, text: str, origin: tuple[int, int], color, thick: int) -> None:
+    font = 0.5 * thick
+    cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, font, (0, 0, 0), thick + 2, cv2.LINE_AA)
+    cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, font, color, thick, cv2.LINE_AA)
+
+
+def draw_firmware_command(
+    image: np.ndarray,
+    status: LockStatus,
+    target: tuple[int, int, int, int] | None,
+    target_age_s: float,
+    gimbal_rate: tuple[float, float] | None,
+) -> None:
+    """Show what the firmware lock asks for and whether the gimbal moves.
+
+    ``target`` is the last command in the firmware's 1280x720 space; the arrow
+    from the image centre to it is the correction requested. ``gimbal_rate`` is
+    the measured (yaw, pitch) turn rate in deg/s from the attitude stream.
+    """
+    height, width = image.shape[:2]
+    thick = max(1, width // 1280 + 1)
+    cx, cy = width // 2, height // 2
+    arm = max(20, width // 40)
+    cv2.line(image, (cx - arm, cy), (cx + arm, cy), CENTRE, thick, cv2.LINE_AA)
+    cv2.line(image, (cx, cy - arm), (cx, cy + arm), CENTRE, thick, cv2.LINE_AA)
+    cv2.circle(image, (cx, cy), arm // 4, CENTRE, thick, cv2.LINE_AA)
+    lines: list[tuple[str, tuple[int, int, int]]] = []
+    if target is not None:
+        stale = target_age_s > 0.5
+        color = STALE if stale else COMMAND
+        tx, ty = round(target[0] * width / 1280), round(target[1] * height / 720)
+        bw, bh = round(target[2] * width / 1280), round(target[3] * height / 720)
+        cv2.rectangle(image, (tx - bw // 2, ty - bh // 2), (tx + bw // 2, ty + bh // 2), color, thick,
+                      cv2.LINE_AA)
+        if (tx - cx) ** 2 + (ty - cy) ** 2 > 16:
+            cv2.arrowedLine(image, (cx, cy), (tx, ty), color, thick + 1, cv2.LINE_AA, tipLength=0.06)
+        lines.append((f"CMD   dx {tx - cx:+5d}  dy {ty - cy:+5d} px   age {target_age_s * 1000:4.0f} ms"
+                      + ("  STALE" if stale else ""), color))
+    if status.state is LockState.LOCKED and status.on_screen:
+        lines.append((f"POINT dx {round(status.x) - cx:+5d}  dy {round(status.y) - cy:+5d} px "
+                      "from centre", LOCKED))
+    if gimbal_rate is None:
+        lines.append(("GIMBAL  no attitude data", STALE))
+    else:
+        yaw_rate, pitch_rate = gimbal_rate
+        lines.append((f"GIMBAL yaw {yaw_rate:+6.1f}  pitch {pitch_rate:+6.1f} deg/s", CENTRE))
+        commanded = target is not None and target_age_s <= 0.5 and (
+            abs(target[0] - 640) > 25 or abs(target[1] - 360) > 25
+        )
+        if commanded and max(abs(yaw_rate), abs(pitch_rate)) < 0.5:
+            lines.append(("NOT ROTATING despite an off-centre command", WARN))
+    step = 22 * thick
+    y = height - 12 - step * (len(lines) - 1)
+    for text, color in lines:
+        _text(image, text, (12, y), color, thick)
+        y += step

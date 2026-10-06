@@ -24,6 +24,7 @@ from siyi_sdk.tracking.control import LockGains, LoopModel, RateController, pixe
 
 _LAZY = {
     "FirmwarePointLock": "siyi_sdk.tracking.firmware",
+    "FirmwareLink": "siyi_sdk.tracking.firmware_link",
     "CalibrationError": "siyi_sdk.tracking.calibrate",
     "FrameMotionRecorder": "siyi_sdk.tracking.calibrate",
     "LoopCalibration": "siyi_sdk.tracking.calibrate",
@@ -53,6 +54,7 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 - dynamic lazy re-exports
 __all__ = [
     "AttitudeHistory",
     "CalibrationError",
+    "FirmwareLink",
     "FirmwarePointLock",
     "FrameMotionRecorder",
     "GimbalPointLock",

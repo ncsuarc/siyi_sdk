@@ -11,6 +11,7 @@ import os
 import time
 import math
 import itertools
+from types import SimpleNamespace
 from collections import deque
 from ipaddress import IPv4Address
 from typing import Optional, AsyncGenerator, Any, Literal
@@ -50,9 +51,9 @@ from web_ui.frame_tap import TapTransport
 from web_ui.pointing import (
     AttitudeHistory, PointingConfig, center_for, clamp_attitude, screen_to_world,
 )
-from web_ui.lock_overlay import draw_lock
+from web_ui.lock_overlay import draw_firmware_command, draw_lock
 from siyi_sdk.tracking import (
-    CalibrationError, FirmwarePointLock, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
+    CalibrationError, FirmwareLink, FirmwarePointLock, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
     calibrate_loop,
 )
 
@@ -125,6 +126,9 @@ class CameraState:
         self.calibration_recorder = FrameMotionRecorder()
         self.calibrating = False
         self.preview_task: Optional[asyncio.Task] = None
+        # In firmware steering mode: the camera's own low-latency 1280x720 stream on
+        # port 37256, which replaces RTSP for the live view and the tracker.
+        self.firmware_link: Optional[FirmwareLink] = None
 
     async def initialize(self, ip: str):
         async with self.lock:
@@ -160,7 +164,7 @@ class CameraState:
                 codec="h264",
             )
             self.stream = SIYIStream(config)
-            self.stream.on_frame(self._on_frame)
+            self.stream.on_frame(self._on_rtsp_frame)
             
             if self.watchdog_task:
                 self.watchdog_task.cancel()
@@ -211,6 +215,7 @@ class CameraState:
                             if self.stream:
                                 await asyncio.wait_for(self.stream.stop(), timeout=3.0)
 
+                    await self.sync_firmware_link()
                     # A video backend failure must not mark a responding camera offline.
                     # Retry video independently, including after a failed start.
                     if self.is_connected and self.live_enabled and self.stream and not self.stream.is_running:
@@ -238,6 +243,39 @@ class CameraState:
     def _on_feedback(self, feedback):
         self.feedback.append({"event": feedback.name, "time": time.time()})
 
+    def firmware_tracking_supported(self) -> bool:
+        version = self.firmware_version
+        return (version is not None and FirmwareVersion.decode_word(version.camera) == (0, 3, 7)
+                and FirmwareVersion.decode_word(version.gimbal) == (0, 4, 9))
+
+    async def sync_firmware_link(self) -> None:
+        """Run the firmware link while firmware steering is selected on a supported camera."""
+        wanted = (self.is_connected and self.ip is not None
+                  and self.pointing.lock_control == "firmware" and self.firmware_tracking_supported())
+        link = self.firmware_link
+        if wanted and link is not None and link.ip == self.ip:
+            return
+        if link is not None:
+            if isinstance(self.point_lock, FirmwarePointLock):
+                await self.release_lock("Point lock released: firmware link stopped", require_confirmed=False)
+            self.firmware_link = None
+            await link.stop()
+        if wanted:
+            self.firmware_link = FirmwareLink(self.ip, on_frame=self._on_link_frame,
+                                              trace=self.trace_tracking)
+            self.firmware_link.start()
+
+    async def _on_link_frame(self, image, arrival: float) -> None:
+        await self._on_frame(SimpleNamespace(frame=image, timestamp=arrival))
+
+    async def _on_rtsp_frame(self, frame):
+        # While the firmware stream delivers, RTSP frames would mix two pictures with
+        # different delays and sizes; use RTSP only until (or unless) it is ready.
+        link = self.firmware_link
+        if link is not None and link.ready:
+            return
+        await self._on_frame(frame)
+
     async def _on_frame(self, frame):
         received = time.monotonic()
         image = frame.frame
@@ -259,6 +297,11 @@ class CameraState:
                 else:
                     image = image.copy()  # keep the marker out of the frame the tracker reads
                     draw_lock(image, status)
+                    if isinstance(lock, FirmwarePointLock):
+                        draw_firmware_command(
+                            image, status, lock.last_target,
+                            time.monotonic() - lock.last_target_time, self.gimbal_rate(),
+                        )
         # The browser preview is encoded in the background so it never holds up
         # the next frame's tracking; if an encode is still running, skip this one.
         if self.preview_task is None or self.preview_task.done():
@@ -435,9 +478,7 @@ class CameraState:
         cfg = self.pointing
         height, width = image.shape[:2]
         if cfg.lock_control == "firmware":
-            version = self.firmware_version
-            if (version is None or FirmwareVersion.decode_word(version.camera) != (0, 3, 7)
-                    or FirmwareVersion.decode_word(version.gimbal) != (0, 4, 9)):
+            if not self.firmware_tracking_supported():
                 self.lock_reason = "Firmware tracking unavailable: requires the inspected camera 0.3.7 / gimbal 0.4.9"
                 raise HTTPException(status_code=503, detail=self.lock_reason)
             if time.monotonic() - self.latest_image_time >= 0.4:
@@ -445,8 +486,15 @@ class CameraState:
             # Stop any outstanding manual speed command and its delayed stop timer.
             await self._firmware_emergency_stop()
             self.motion_deadlines.pop("rotate", None)
+            link = self.firmware_link
+            if link is not None and not link.ready:
+                raise HTTPException(status_code=503, detail=link.error or (
+                    "Waiting for the camera's tracking video (it starts at a keyframe, "
+                    "about every 2.5 s)"))
             lock = FirmwarePointLock(
-                FirmwareTrackingClient(self.ip, trace=self.trace_tracking),
+                link.client if link is not None
+                else FirmwareTrackingClient(self.ip, trace=self.trace_tracking),
+                owns_connection=link is None,
                 stop=self._firmware_emergency_stop, model=cfg.lock_model,
                 # No attitude-based delay correction: with an unreliable pitch sign (inverted
                 # bench mount) it drove the gimbal to its limit. Damp with the response instead.
@@ -484,6 +532,18 @@ class CameraState:
         self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
         return self.lock_snapshot()
+
+    def gimbal_rate(self, window: float = 0.3) -> Optional[tuple[float, float]]:
+        """Measured (yaw, pitch) turn rate in deg/s over the last ``window`` seconds."""
+        samples = self.attitude_history.samples
+        if len(samples) < 2 or time.monotonic() - samples[-1][0] > 0.3:
+            return None
+        newest = samples[-1]
+        oldest = next((s for s in samples if s[0] >= newest[0] - window), samples[0])
+        span = newest[0] - oldest[0]
+        if span < 0.05:
+            return None
+        return (newest[1] - oldest[1]) / span, (newest[2] - oldest[2]) / span
 
     def trace_tracking(self, event: str, fields: dict) -> None:
         self.tracking_log.append({"id": next(self.tracking_log_ids), "t": time.time(),
@@ -644,6 +704,9 @@ class CameraState:
 
     async def shutdown(self):
         await self.release_lock("Point lock released: camera shutting down", require_confirmed=False)
+        link, self.firmware_link = self.firmware_link, None
+        if link is not None:
+            await link.stop()
         for task in list(self.confirmation_tasks.values()):
             task.cancel()
             try:
@@ -908,6 +971,7 @@ async def set_pointing_config(req: PointingConfigRequest):
         if vars(state.pointing) != req.model_dump():
             await state._release_lock("Point lock released: steering settings changed")
         state.pointing = PointingConfig(**req.model_dump())
+    await state.sync_firmware_link()
     return vars(state.pointing)
 
 @app.post("/api/track/lock")

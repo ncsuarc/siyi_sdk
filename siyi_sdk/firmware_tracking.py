@@ -27,6 +27,11 @@ KEEPALIVE_INTERVAL = 1.0
 REPLY_TIMEOUT = 1.5
 _MAGIC = b"\x55\x66\xaa\xbb"
 _MAX_PAYLOAD = 4096 - 20  # receive buffer in the inspected camera firmware
+# Received packets can be larger: 0x90 carries whole encoded frames (cardv caps them near 358 KB).
+_MAX_RX_PAYLOAD = 0x60000
+# One encoded video frame from the camera's 0x90 stream: (frame counter, H.265 Annex-B
+# access unit, monotonic arrival time).
+VideoSink = Callable[[int, bytes, float], None]
 
 # Diagnostic sink: called with an event name and its fields; must not raise.
 Trace = Callable[[str, dict[str, Any]], None]
@@ -95,7 +100,7 @@ class FirmwareFrameParser:
             header_crc = struct.unpack_from("<I", self._buffer, 12)[0]
             if (
                 flags > 3
-                or length > _MAX_PAYLOAD
+                or length > _MAX_RX_PAYLOAD
                 or header_crc != firmware_crc32(bytes(self._buffer[:12]))
             ):
                 self.discarded += 1
@@ -129,10 +134,13 @@ class FirmwareTrackingClient:
         *,
         transport: AbstractTransport | None = None,
         trace: Trace | None = None,
+        on_video: VideoSink | None = None,
     ) -> None:
         """Use a dedicated port 37256 transport, or an injected transport.
 
         ``trace`` receives every frame, request outcome and connection event.
+        ``on_video`` receives the camera's 0x90 video frames once
+        :meth:`start_video` has requested them (they are not traced one by one).
         """
         self._transport = transport or TCPTransport(ip, 37256, connect_timeout=CONNECT_TIMEOUT)
         self._reader: asyncio.Task[None] | None = None
@@ -142,6 +150,8 @@ class FirmwareTrackingClient:
         self._pending: tuple[int, bytes | None, asyncio.Future[bytes]] | None = None
         self._sequence = 0
         self._trace = trace or _no_trace
+        self._on_video = on_video
+        self.video_frames = 0
         self.error: str | None = None
 
     def _emit(self, event: str, **fields: Any) -> None:
@@ -219,7 +229,20 @@ class FirmwareTrackingClient:
         try:
             async for chunk in self._transport.stream():
                 discarded = parser.discarded
+                arrival = time.monotonic()
                 for frame in parser.feed(chunk):
+                    if frame.command == 0x90 and len(frame.payload) > 6:
+                        # 6-byte header: little-endian frame counter, then 01 00.
+                        if self.video_frames == 0:
+                            self._emit("video_started", header=frame.payload[:6].hex(" "))
+                        self.video_frames += 1
+                        self._emit("video_packet", n=struct.unpack_from("<I", frame.payload)[0],
+                                   bytes=len(frame.payload) - 6, chunk=len(chunk))
+                        if self._on_video is not None:
+                            index = struct.unpack_from("<I", frame.payload)[0]
+                            with contextlib.suppress(Exception):
+                                self._on_video(index, frame.payload[6:], arrival)
+                        continue
                     self._emit(
                         "rx", cmd=f"0x{frame.command:02X}", seq=frame.sequence, flags=frame.flags,
                         len=len(frame.payload), payload=frame.payload[:64].hex(" "),
@@ -301,6 +324,18 @@ class FirmwareTrackingClient:
             raise TimeoutError(
                 f"Camera did not confirm AI {state} within {REPLY_TIMEOUT:g} s"
             ) from None
+
+    async def start_video(self) -> None:
+        """Ask the camera for its 1280x720 H.265 stream (0x90 on, as the AI module does).
+
+        The camera ignores the request unless it is flagged as needing a reply;
+        its first video frame is that reply.
+        """
+        await asyncio.wait_for(self._send(0x90, bytes([1])), IO_TIMEOUT)
+
+    async def stop_video(self) -> None:
+        """Stop the 0x90 stream."""
+        await asyncio.wait_for(self._send(0x90, bytes([0])), IO_TIMEOUT)
 
     async def send_target(self, x: int, y: int, width: int, height: int) -> None:
         """Send one 1280x720 target, any-object type/state (255/4), without autozoom."""

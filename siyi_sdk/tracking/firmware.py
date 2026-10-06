@@ -44,6 +44,7 @@ class FirmwarePointLock:
         video_delay_s: float = 0.2,
         hfov_deg: float = 81.0,
         response: float = 1.0,
+        owns_connection: bool = True,
     ) -> None:
         """Create an idle controller using the existing fixed-scene point tracker.
 
@@ -74,6 +75,9 @@ class FirmwarePointLock:
         self._hfov = hfov_deg
         self._zoom = 1.0
         self._response = response
+        # False when a FirmwareLink keeps ``client`` connected: the lock then neither
+        # connects nor closes it, and only switches AI mode.
+        self._owns_connection = owns_connection
         self._tracker: PointLock | None = None
         self._lifecycle = asyncio.Lock()
         self._update_lock = asyncio.Lock()
@@ -88,6 +92,10 @@ class FirmwarePointLock:
         self.status = LockStatus(LockState.IDLE)
         self.reason: str | None = None
         self.exit_confirmed = True
+        # Last target written to the camera, (x, y, width, height) in its 1280x720 space,
+        # and when; for showing the commanded correction on the video.
+        self.last_target: tuple[int, int, int, int] | None = None
+        self.last_target_time = 0.0
 
     @property
     def active(self) -> bool:
@@ -126,7 +134,10 @@ class FirmwarePointLock:
                 self.client.note("lock_start", x=round(x), y=round(y), size=size, zoom=zoom,
                                  frame=f"{width}x{height}", response=self._response,
                                  send_interval=self._send_interval)
-                await self.client.connect()
+                if self._owns_connection:
+                    await self.client.connect()
+                elif not self.client.is_connected:
+                    raise ConnectionError("Firmware link is not connected")
                 self._needs_disable = True  # a lost acknowledgement can still mean enabled
                 if await self.client.get_mode():
                     # Left on by an earlier lock whose exit was never confirmed (the camera
@@ -199,6 +210,7 @@ class FirmwarePointLock:
                 video_age_ms=round((time.monotonic() - self._last_timestamp) * 1000),
             )
         await self.client.send_target(*target)
+        self.last_target, self.last_target_time = target, time.monotonic()
 
     async def update(
         self, frame: Image, *, zoom: float = 1.0, timestamp: float | None = None
@@ -307,6 +319,8 @@ class FirmwarePointLock:
                     self.client.note("disable_retry", error=repr(exc),
                                      connected=self.client.is_connected)
                     if not self.client.is_connected:
+                        if not self._owns_connection:
+                            raise  # the link switches AI mode off when it reconnects
                         await self.client.close()
                         await self.client.connect()
                     await self.client.set_mode(False)
@@ -322,5 +336,6 @@ class FirmwarePointLock:
                 )
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(self._stop(), IO_TIMEOUT)
-        with contextlib.suppress(Exception):
-            await self.client.close()
+        if self._owns_connection:
+            with contextlib.suppress(Exception):
+                await self.client.close()
