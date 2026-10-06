@@ -74,6 +74,18 @@ def _ms(started: float) -> float:
     return round((time.monotonic() - started) * 1000, 1)
 
 
+def _socket_details(sock: Any) -> dict[str, Any]:
+    """Local address and buffer sizes of a connected socket, for the trace (best effort)."""
+    import socket
+
+    details: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        details["local"] = "%s:%s" % sock.getsockname()[:2]
+        details["rcvbuf"] = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        details["nodelay"] = bool(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+    return details
+
+
 async def _stamped(chunks: AsyncIterator[bytes]) -> AsyncIterator[tuple[bytes, float]]:
     """Pair chunks from a transport that doesn't stamp them with the time each was read."""
     async for chunk in chunks:
@@ -233,7 +245,8 @@ class FirmwareTrackingClient:
         quick_ack = False
         with contextlib.suppress(Exception):
             quick_ack = disable_delayed_ack(getattr(self._transport, "socket", None))
-        self._emit("connected", ms=_ms(started), quick_ack=quick_ack)
+        self._emit("connected", ms=_ms(started), quick_ack=quick_ack,
+                   **_socket_details(getattr(self._transport, "socket", None)))
         self._reader = asyncio.create_task(self._read())
         self._keepalive = asyncio.create_task(self._keep_alive())
 

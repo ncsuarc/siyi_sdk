@@ -112,21 +112,91 @@ window.addEventListener('load', () => {
         render();
     });
     document.getElementById('log-clear').addEventListener('click', () => { frames = []; render(); });
-    document.getElementById('log-export').addEventListener('click', async () => {
-        // The SDK frames plus the firmware tracking channel and lock events, on one clock.
-        const fetchJSON = async url => {
-            try {
-                const response = await fetch(url, {cache: 'no-store'});
-                return response.ok ? await response.json() : {error: `HTTP ${response.status}`};
-            } catch (error) {
-                return {error: error.message};
+    // The server's trace and diagnostics are fetched when you export, and a server that has
+    // stopped (or a camera session that has ended) answers nothing. So the page keeps its own
+    // copy, refreshed while the server answers, and the export falls back to it, marked stale.
+    const fetchJSON = async url => {
+        const started = performance.now();
+        try {
+            const response = await fetch(url, {cache: 'no-store'});
+            const data = response.ok ? await response.json() : {error: `HTTP ${response.status}`};
+            return {data, ms: Math.round(performance.now() - started)};
+        } catch (error) {
+            return {data: {error: error.message}, ms: Math.round(performance.now() - started)};
+        }
+    };
+    const cache = {tracking: [], lastId: 0, settings: null, diagnostics: null, at: null,
+                   serverStarted: null};
+    // A restarted server numbers its records from 1 again, so what was cached is another run.
+    const forgetOtherRuns = diagnostics => {
+        const started = diagnostics.data && diagnostics.data.server_started;
+        if (started && cache.serverStarted && started !== cache.serverStarted) {
+            cache.tracking = []; cache.lastId = 0;
+        }
+        if (started) cache.serverStarted = started;
+    };
+    const maxTracking = 30000;
+    let refreshing = false;
+    async function refreshCache() {
+        if (refreshing) return;
+        refreshing = true;
+        try {
+            const diagnostics = await fetchJSON('/api/debug/diagnostics');
+            forgetOtherRuns(diagnostics);
+            const [tracking, settings] = await Promise.all([
+                fetchJSON(`/api/debug/tracking?since=${cache.lastId}`),
+                fetchJSON('/api/pointing/config'),
+            ]);
+            if (Array.isArray(tracking.data)) {
+                if (tracking.data.length) {
+                    cache.tracking = cache.tracking.concat(tracking.data).slice(-maxTracking);
+                    cache.lastId = tracking.data[tracking.data.length - 1].id;
+                }
+                cache.at = Date.now() / 1000;
             }
-        };
+            if (!settings.data.error) cache.settings = settings.data;
+            if (!diagnostics.data.error) cache.diagnostics = diagnostics.data;
+        } finally {
+            refreshing = false;
+        }
+    }
+    setInterval(refreshCache, 10000);
+    refreshCache();
+
+    document.getElementById('log-export').addEventListener('click', async () => {
+        const diagnostics = await fetchJSON('/api/debug/diagnostics');
+        forgetOtherRuns(diagnostics);
         const [tracking, settings] = await Promise.all([
-            fetchJSON('/api/debug/tracking'), fetchJSON('/api/pointing/config'),
+            fetchJSON(`/api/debug/tracking?since=${cache.lastId}`),
+            fetchJSON('/api/pointing/config'),
         ]);
+        const live = {tracking: Array.isArray(tracking.data), settings: !settings.data.error,
+                      diagnostics: !diagnostics.data.error};
+        const merged = live.tracking ? cache.tracking.concat(tracking.data) : cache.tracking;
+        const exportedAt = Date.now() / 1000;
         window.downloadJSON(`siyi-frames-${Date.now()}.json`, {
-            exported_at: Date.now() / 1000, settings, frames, tracking,
+            exported_at: exportedAt,
+            // Where each part came from. stale means the server did not answer and the page's
+            // last good copy (taken at cached_at) was used instead.
+            meta: {
+                page: location.href, user_agent: navigator.userAgent,
+                timezone_offset_min: new Date().getTimezoneOffset(),
+                frames: {count: frames.length, max: maxFrames,
+                         first_t: frames.length ? frames[0].t : null,
+                         last_t: frames.length ? frames[frames.length - 1].t : null,
+                         source: 'this page (what it received while open)'},
+                server: {tracking_ok: live.tracking, settings_ok: live.settings,
+                         diagnostics_ok: live.diagnostics,
+                         tracking_stale: !live.tracking, settings_stale: !live.settings,
+                         diagnostics_stale: !live.diagnostics, cached_at: cache.at,
+                         fetch_ms: {tracking: tracking.ms, settings: settings.ms,
+                                    diagnostics: diagnostics.ms},
+                         errors: [tracking, settings, diagnostics]
+                             .map(r => r.data && r.data.error).filter(Boolean)},
+            },
+            settings: live.settings ? settings.data : (cache.settings || settings.data),
+            diagnostics: live.diagnostics ? diagnostics.data : (cache.diagnostics || diagnostics.data),
+            frames, tracking: merged,
         });
     });
 });

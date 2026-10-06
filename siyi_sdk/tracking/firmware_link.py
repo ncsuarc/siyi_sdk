@@ -72,6 +72,42 @@ class CaptureClock:
         return self._capture
 
 
+class _VideoStats:
+    """What the video did in the last second: how bursty, how late, how busy the decoder was."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.packets = self.nbytes = self.bursts = self.gaps_over_200 = self.deliveries = 0
+        self.max_gap = self.max_decode = self.max_lag = 0.0
+        self.max_batch = 0
+        self._last = 0.0
+
+    def packet(self, size: int, arrival: float) -> None:
+        gap = (arrival - self._last) * 1000 if self._last else 0.0
+        self._last = arrival
+        self.packets += 1
+        self.nbytes += size
+        if gap > 60:  # the same split the analysis used: a new burst starts after a 60 ms gap
+            self.bursts += 1
+        self.gaps_over_200 += gap > 200
+        self.max_gap = max(self.max_gap, gap)
+
+    def delivery(self, decode_ms: float, lag_ms: float, batch: int) -> None:
+        self.deliveries += 1
+        self.max_decode = max(self.max_decode, decode_ms)
+        self.max_lag = max(self.max_lag, lag_ms)
+        self.max_batch = max(self.max_batch, batch)
+
+    def summary(self, now: float) -> dict[str, Any]:
+        return {
+            "seconds": round(now - self.started, 2), "packets": self.packets,
+            "kbytes": round(self.nbytes / 1024, 1), "bursts": self.bursts,
+            "max_gap_ms": round(self.max_gap, 1), "gaps_over_200ms": self.gaps_over_200,
+            "pictures": self.deliveries, "max_batch": self.max_batch,
+            "max_decode_ms": round(self.max_decode, 1), "max_lag_ms": round(self.max_lag, 1),
+        }
+
+
 class FirmwareLink:
     """Keep one port 37256 connection open, stream and decode the camera's video.
 
@@ -89,6 +125,7 @@ class FirmwareLink:
         # (frame counter, H.265 access unit, arrival time, estimated capture time)
         self._packets: deque[tuple[int, bytes, float, float]] = deque()
         self._clock = CaptureClock()
+        self._stats = _VideoStats()
         self._wake = asyncio.Event()
         self._decoder: Any = None
         self._last_packet = 0.0
@@ -119,6 +156,13 @@ class FirmwareLink:
                 await task
         await self._close_client()
 
+    def _report_stats(self) -> None:
+        """Trace a once-a-second summary of the video, so a bad second shows up at a glance."""
+        now = time.monotonic()
+        if now - self._stats.started >= 1.0:
+            self._note("video_stats", **self._stats.summary(now))
+            self._stats = _VideoStats()
+
     def _note(self, event: str, **fields: Any) -> None:
         if self._trace is not None:
             with contextlib.suppress(Exception):
@@ -126,6 +170,7 @@ class FirmwareLink:
 
     def _queue(self, index: int, data: bytes, arrival: float) -> None:
         self._last_packet = arrival
+        self._stats.packet(len(data), arrival)
         self._packets.append((index, data, arrival, self._clock.update(index, arrival)))
         self._wake.set()
 
@@ -151,6 +196,7 @@ class FirmwareLink:
                 self._decoder.thread_type = "SLICE"  # frame threading would add frames of delay
                 self._packets.clear()
                 self._clock = CaptureClock()
+                self._stats = _VideoStats()
                 self.last_frame_time = 0.0  # not ready until this connection delivers video
                 client = FirmwareTrackingClient(self.ip, trace=self._trace, on_video=self._queue)
                 await client.connect()
@@ -173,6 +219,7 @@ class FirmwareLink:
                 decode = asyncio.create_task(self._decode_loop())
                 while client.is_connected and not decode.done():
                     await asyncio.sleep(0.2)
+                    self._report_stats()
                     if time.monotonic() - self._last_packet > VIDEO_STALL:
                         raise TimeoutError(f"No camera video for {VIDEO_STALL:g} s")
                 if decode.done():
@@ -204,6 +251,8 @@ class FirmwareLink:
             # only the newest picture, so a burst never builds a backlog.
             started = time.monotonic()
             image = await asyncio.to_thread(self._decode, batch)
+            self._stats.delivery((time.monotonic() - started) * 1000,
+                                 (batch[-1][2] - batch[-1][3]) * 1000, len(batch))
             # Per delivery: how many packets were waiting, decode time, and packet age.
             # lag_ms: how much longer the newest frame sat in the pipe than the window's best.
             self._note("video_delivered", packets=len(batch), first=batch[0][0], last=batch[-1][0],

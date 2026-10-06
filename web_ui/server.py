@@ -11,6 +11,10 @@ import os
 import time
 import math
 import itertools
+import platform
+import re
+import subprocess
+import sys
 from types import SimpleNamespace
 from collections import deque
 from ipaddress import IPv4Address
@@ -72,6 +76,43 @@ GLOBAL_CONFIG = {
 # and the SIYI AI module sends the camera nothing but a record-status request.
 LINK_STATUS_INTERVAL = 10.0
 
+def wifi_info() -> Optional[dict]:
+    """The Wi-Fi network, band and signal this computer is on (Windows only), best effort."""
+    if sys.platform != "win32":
+        return None
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True,
+                             text=True, timeout=3).stdout
+    except Exception:
+        return None
+    keys = {"SSID": "ssid", "AP BSSID": "bssid", "Band": "band", "Channel": "channel",
+            "Signal": "signal", "Receive rate (Mbps)": "rx_mbps",
+            "Transmit rate (Mbps)": "tx_mbps", "Radio type": "radio", "Rssi": "rssi",
+            "State": "state", "Description": "adapter"}
+    info: dict = {}
+    for line in out.splitlines():
+        match = re.match(r"\s+([A-Za-z() ]+?)\s*:\s*(.+?)\s*$", line)
+        if match and match.group(1) in keys and keys[match.group(1)] not in info:
+            info[keys[match.group(1)]] = match.group(2)
+    return info or None
+
+
+def git_revision() -> Optional[str]:
+    """The commit this server runs, with a marker when the working tree has changes."""
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                               cwd=root, capture_output=True, text=True, timeout=2).stdout.strip()
+        return f"{rev}{'+uncommitted' if dirty else ''}" if rev else None
+    except Exception:
+        return None
+
+
+SERVER_STARTED = time.time()
+
+
 class CameraState:
     def __init__(self):
         self.client: Optional[SIYIClient] = None
@@ -120,6 +161,13 @@ class CameraState:
         self.point_lock: Optional[GimbalPointLock | FirmwarePointLock] = None
         # Firmware tracking channel (port 37256) frames and lock events, for the protocol export.
         self.tracking_log: deque = deque(maxlen=5000)
+        # Per-packet video events arrive ~25 per second and would push lock and request events
+        # out of the log within minutes, so they live in a ring of their own (merged on export).
+        self.video_log: deque = deque(maxlen=6000)
+        self.loop_lag_ms: deque = deque(maxlen=600)  # (time.time(), lag) every 100 ms
+        self.wifi: Optional[dict] = None
+        self.diag_task: Optional[asyncio.Task] = None
+        self._link_was_live: Optional[bool] = None
         self.tracking_log_ids = itertools.count(1)
         self.tracking_lock = asyncio.Lock()
         self.lock_reason: Optional[str] = None
@@ -158,6 +206,8 @@ class CameraState:
             # keep the same UDP socket used by telemetry and motion control.
             self.status_task = asyncio.create_task(self.poll_status())
             self.motion_task = asyncio.create_task(self.motion_watchdog())
+            if self.diag_task is None or self.diag_task.done():
+                self.diag_task = asyncio.create_task(self.diagnostics_monitor())
             self.media = MediaClient(ip)
             
             # Initialize Video Stream
@@ -222,6 +272,7 @@ class CameraState:
                                 await asyncio.wait_for(self.stream.stop(), timeout=3.0)
 
                     await self.sync_firmware_link()
+                    self.note_link_state()
                     # A video backend failure must not mark a responding camera offline.
                     # Retry video independently, including after a failed start.
                     # While the firmware link delivers video, RTSP frames are discarded; stop
@@ -378,12 +429,15 @@ class CameraState:
                 }
                 self.status_time = time.monotonic()
                 self.status_error = None
+                self.trace_tracking("status_poll", {"ms": rtt, "link_live": self.link_live()})
                 return self.camera_status
             except Exception as e:
                 self.rtt_samples.append(None)
                 self.rtt_failures.append(True)
                 self.status_error = str(e) or "Camera status query failed"
                 self.last_status_failure = f"{type(e).__name__}: {self.status_error}"
+                self.trace_tracking("status_poll", {"error": self.last_status_failure,
+                                                    "link_live": self.link_live()})
                 raise
 
     def begin_confirmation(self, kind, target, send_ms):
@@ -585,8 +639,86 @@ class CameraState:
         return (newest[1] - oldest[1]) / span, (newest[2] - oldest[2]) / span
 
     def trace_tracking(self, event: str, fields: dict) -> None:
-        self.tracking_log.append({"id": next(self.tracking_log_ids), "t": time.time(),
-                                  "event": event, **fields})
+        log = self.video_log if event == "video_packet" else self.tracking_log
+        log.append({"id": next(self.tracking_log_ids), "t": time.time(), "event": event, **fields})
+
+    def trace_records(self, since: int = 0) -> list:
+        """Lifecycle and per-packet records together, in the order they happened."""
+        records = [r for r in (*self.tracking_log, *self.video_log) if r["id"] > since]
+        return sorted(records, key=lambda r: r["id"])
+
+    async def diagnostics_monitor(self) -> None:
+        """Record event-loop lag every 100 ms and the Wi-Fi state every 15 s.
+
+        A burst in the camera's video can come from the network, the camera, or this process
+        being too busy to read; loop lag and the Wi-Fi link (network, band, signal) tell them
+        apart.
+        """
+        loop = asyncio.get_running_loop()
+        next_report = next_wifi = 0.0
+        expected = loop.time() + 0.1
+        while True:
+            await asyncio.sleep(max(0.0, expected - loop.time()))
+            lag = max(0.0, loop.time() - expected) * 1000
+            expected = loop.time() + 0.1
+            self.loop_lag_ms.append((time.time(), round(lag, 1)))
+            now = time.monotonic()
+            if now >= next_report:
+                next_report = now + 5
+                recent = sorted(v for t, v in self.loop_lag_ms if t > time.time() - 5)
+                if recent:
+                    self.trace_tracking("loop_lag", {
+                        "max_ms": recent[-1], "p99_ms": recent[int(len(recent) * 0.99) - 1],
+                        "over_50ms": sum(1 for v in recent if v > 50), "samples": len(recent)})
+            if now >= next_wifi:
+                next_wifi = now + 15
+                info = await asyncio.to_thread(wifi_info)
+                if info:
+                    if (self.wifi or {}).get("ssid") != info.get("ssid"):
+                        info["changed"] = True
+                    self.wifi = info
+                    self.trace_tracking("wifi", info)
+
+    def note_link_state(self) -> None:
+        """Trace the moments the firmware link starts or stops delivering video."""
+        live = self.link_live()
+        if live != self._link_was_live:
+            link = self.firmware_link
+            self._link_was_live = live
+            self.trace_tracking("link_live", {"live": live, "error": getattr(link, "error", None)})
+
+    def diagnostics(self) -> dict:
+        """Everything about this process and the camera link that helps explain a log."""
+        now = time.monotonic()
+        link = self.firmware_link
+        lag = sorted(v for _, v in self.loop_lag_ms)
+
+        def age(t):
+            return round((now - t) * 1000) if t else None
+
+        return {
+            "time": time.time(), "monotonic": now, "server_started": SERVER_STARTED,
+            "python": sys.version.split()[0], "platform": platform.platform(),
+            "git": git_revision(), "camera_ip": self.ip, "connected": self.is_connected,
+            "firmware_version": vars(self.firmware_version) if self.firmware_version else None,
+            "lock_control": self.pointing.lock_control,
+            "link": None if link is None else {
+                "ready": link.ready, "error": link.error, "frame_age_ms": age(link.last_frame_time),
+                "video_frames": getattr(link.client, "video_frames", None) if link.client else None,
+            },
+            "polling": {"link_live": self.link_live(), "status_age_ms": age(self.status_time),
+                        "link_status_interval_s": LINK_STATUS_INTERVAL,
+                        "attitude_age_ms": age(self.attitude_time)},
+            "status": self.status_snapshot(),
+            "loop_lag_ms": {"samples": len(lag), "max": lag[-1] if lag else None,
+                            "p99": lag[int(len(lag) * 0.99) - 1] if lag else None,
+                            "over_50ms": sum(1 for v in lag if v > 50)},
+            "wifi": self.wifi,
+            "trace": {"lifecycle_records": len(self.tracking_log),
+                      "video_records": len(self.video_log),
+                      "lifecycle_capacity": self.tracking_log.maxlen,
+                      "video_capacity": self.video_log.maxlen},
+        }
 
     async def _firmware_emergency_stop(self) -> None:
         if self.client:
@@ -755,14 +887,14 @@ class CameraState:
         self.confirmation_tasks.clear()
         self.actions.clear()
         self.last_status_failure = None
-        for task in (self.status_task, self.motion_task):
+        for task in (self.status_task, self.motion_task, self.diag_task):
             if task:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-        self.status_task = self.motion_task = None
+        self.status_task = self.motion_task = self.diag_task = None
         for kind in list(self.motion_deadlines):
             try:
                 await self.send_motion(kind, (0, 0) if kind == "rotate" else 0)
@@ -1333,7 +1465,13 @@ async def debug_frames(since: int = 0):
 
 @app.get("/api/debug/tracking")
 async def debug_tracking(since: int = 0):
-    return [record for record in state.tracking_log if record["id"] > since]
+    return state.trace_records(since)
+
+@app.get("/api/debug/diagnostics")
+async def debug_diagnostics():
+    # The Wi-Fi reading is fresh at export time, not up to 15 s old.
+    state.wifi = await asyncio.to_thread(wifi_info) or state.wifi
+    return state.diagnostics()
 
 @app.websocket("/ws/attitude")
 async def websocket_attitude(websocket: WebSocket):
