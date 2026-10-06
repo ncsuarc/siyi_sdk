@@ -107,6 +107,19 @@ class TCPTransport(AbstractTransport):
         self._connected = False
         logger.info("disconnected", transport="tcp")
 
+    async def abort(self) -> None:
+        """Drop the connection at once with a TCP reset, discarding unsent data.
+
+        Unlike :meth:`close`, this never waits for the peer, so a stalled peer
+        cannot keep the connection half-open on its side.
+        """
+        if self._writer:
+            self._writer.transport.abort()
+            self._writer = None
+            self._reader = None
+        self._connected = False
+        logger.info("aborted", transport="tcp")
+
     async def send(self, data: bytes) -> None:
         """Send data over TCP.
 

@@ -33,7 +33,16 @@ class AttitudeHistory:
         self.samples: deque[tuple[float, float, float]] = deque()
 
     def add(self, t: float, yaw: float, pitch: float) -> None:
-        """Record a sample taken at monotonic time ``t``."""
+        """Record a sample taken at monotonic time ``t``.
+
+        Angles are unwrapped against the previous sample, so a gimbal reporting
+        near ±180° (e.g. pitch when mounted inverted) moves smoothly instead of
+        jumping 360°. Stored values may therefore leave the -180..180 range.
+        """
+        if self.samples:
+            _, last_yaw, last_pitch = self.samples[-1]
+            yaw += 360.0 * round((last_yaw - yaw) / 360.0)
+            pitch += 360.0 * round((last_pitch - pitch) / 360.0)
         self.samples.append((t, yaw, pitch))
         while self.samples and self.samples[0][0] < t - self.seconds:
             self.samples.popleft()

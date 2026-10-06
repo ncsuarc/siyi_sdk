@@ -8,8 +8,15 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 
-from siyi_sdk.firmware_tracking import IO_TIMEOUT, FirmwareTrackingClient
-from siyi_sdk.tracking.gimbal import LockState, LockStatus
+from siyi_sdk.firmware_tracking import (
+    CONNECT_TIMEOUT,
+    IO_TIMEOUT,
+    REPLY_TIMEOUT,
+    FirmwareTrackingClient,
+)
+from siyi_sdk.tracking.attitude import AttitudeHistory
+from siyi_sdk.tracking.control import pixel_error_deg
+from siyi_sdk.tracking.gimbal import _ATTITUDE_STALE_S, LockState, LockStatus
 from siyi_sdk.tracking.point_lock import Image, PointLock, PointModel
 
 
@@ -17,8 +24,9 @@ class FirmwarePointLock:
     """Send observed scene coordinates; the gimbal does all steering and zoom compensation.
 
     Loss, off-screen points, stale video and connection failure release the lock.
-    Each instance is single-use. It never reconnects, replays targets or falls
-    back to the app controller. ``stop`` is only an emergency public-SDK stop.
+    Each instance is single-use. It never replays targets or falls back to the
+    app controller, and reconnects only to switch AI mode off after the camera
+    closed the channel. ``stop`` is only an emergency public-SDK stop.
     """
 
     control = "firmware"
@@ -30,12 +38,42 @@ class FirmwarePointLock:
         stop: Callable[[], Awaitable[None]],
         model: PointModel = "local",
         min_score: float = 0.2,
+        send_interval: float = 0.05,
+        attitude: AttitudeHistory | None = None,
+        attitude_signs: tuple[int, int] = (1, 1),
+        video_delay_s: float = 0.2,
+        hfov_deg: float = 81.0,
+        response: float = 1.0,
     ) -> None:
-        """Create an idle controller using the existing fixed-scene point tracker."""
+        """Create an idle controller using the existing fixed-scene point tracker.
+
+        ``send_interval`` limits target writes (default 20 Hz, near the SIYI AI
+        module's per-frame rate); the tracker still processes every frame. The
+        firmware keeps steering toward the last target, so slow updates (2 Hz)
+        made it overshoot into a growing oscillation.
+
+        With ``attitude``, each target is shifted by the gimbal's turn since the
+        frame was captured (``video_delay_s`` before arrival). Otherwise the
+        firmware keeps steering toward where the point was, and overshoots.
+        It relies on correct attitude signs and video delay; a wrong sign makes
+        the gimbal run away to a limit.
+
+        ``response`` below 1 sends the point that fraction of the way from the
+        image centre, so the firmware steers more gently. It needs no measured
+        values, and the point still converges to the centre.
+        """
         self.client = client
         self._stop = stop
         self._model = model
         self._min_score = min_score
+        self._send_interval = send_interval
+        self._last_send = 0.0
+        self._attitude = attitude
+        self._signs = attitude_signs
+        self._video_delay = video_delay_s
+        self._hfov = hfov_deg
+        self._zoom = 1.0
+        self._response = response
         self._tracker: PointLock | None = None
         self._lifecycle = asyncio.Lock()
         self._update_lock = asyncio.Lock()
@@ -57,12 +95,20 @@ class FirmwarePointLock:
         return self.status.state is LockState.LOCKED
 
     async def start(
-        self, frame: Image, x: float, y: float, *, size: int = 60, timestamp: float | None = None
+        self,
+        frame: Image,
+        x: float,
+        y: float,
+        *,
+        size: int = 60,
+        timestamp: float | None = None,
+        zoom: float = 1.0,
     ) -> None:
         """Initialize a point and confirm firmware mode before sending coordinates."""
         if self._used:
             raise RuntimeError("Create a new FirmwarePointLock for each lock")
         self._used = True
+        self._zoom = zoom
         generation = self._generation
         self._last_frame = time.monotonic()
         self._last_timestamp = timestamp if timestamp is not None else self._last_frame
@@ -77,41 +123,82 @@ class FirmwarePointLock:
             try:
                 if generation != self._generation:
                     raise RuntimeError("Point lock cancelled during initialization")
+                self.client.note("lock_start", x=round(x), y=round(y), size=size, zoom=zoom,
+                                 frame=f"{width}x{height}", response=self._response,
+                                 send_interval=self._send_interval)
                 await self.client.connect()
-                if await self.client.get_mode():
-                    raise RuntimeError(
-                        "Firmware AI tracking is already active; "
-                        "release its current controller first"
-                    )
                 self._needs_disable = True  # a lost acknowledgement can still mean enabled
+                if await self.client.get_mode():
+                    # Left on by an earlier lock whose exit was never confirmed (the camera
+                    # keeps AI mode across disconnects). This assumes no AI module is also
+                    # steering; with one attached, this takes control away from it.
+                    self.client.note("ai_mode_was_left_on")
+                    await self.client.set_mode(False)
                 self.exit_confirmed = False
                 await self.client.set_mode(True)
                 if (
                     generation != self._generation
-                    or time.monotonic() - self._last_timestamp >= IO_TIMEOUT
+                    # Connecting can take most of CONNECT_TIMEOUT. The gimbal was stopped
+                    # before the lock started, so the start frame's point is still valid.
+                    or time.monotonic() - self._last_timestamp
+                    >= CONNECT_TIMEOUT + 2 * REPLY_TIMEOUT
                 ):
                     raise RuntimeError("Point lock cancelled or video stale during activation")
                 self._tracker = tracker
                 self.status = LockStatus(LockState.LOCKED, x, y, width, height, score=1.0)
                 await self._send(tracker, width, height)
+                # No frames are processed during activation; time video freshness from now.
+                self._last_frame = time.monotonic()
                 self._watchdog = asyncio.create_task(self._watch())
                 self._health = asyncio.create_task(self._check_mode())
-            except BaseException:
+                self.client.note("locked")
+            except BaseException as exc:
+                self.client.note("lock_start_failed", error=repr(exc))
                 self._tracker = None
                 self.status = LockStatus(LockState.IDLE)
                 await self._disable()
                 raise
 
+    def _predict(self, x: float, y: float, width: int, height: int) -> tuple[float, float]:
+        """Move a captured-frame point to where the gimbal's turn since capture puts it now."""
+        latest = self._attitude.latest() if self._attitude is not None else None
+        if latest is None or time.monotonic() - latest[0] > _ATTITUDE_STALE_S:
+            return x, y
+        then = self._attitude.at(self._last_timestamp - self._video_delay)
+        if then is None:
+            return x, y
+        turned_yaw = (latest[1] - then[0]) * self._signs[0]
+        turned_pitch = (latest[2] - then[1]) * self._signs[1]
+        yaw, pitch = pixel_error_deg(x, y, width, height, hfov_deg=self._hfov, zoom=self._zoom)
+        tan_half = math.tan(math.radians(self._hfov) / 2) / self._zoom
+        yaw, pitch = yaw - turned_yaw, pitch - turned_pitch
+        if max(abs(yaw), abs(pitch)) >= 89:
+            return x, y
+        return (
+            width * (1 + math.tan(math.radians(yaw)) / tan_half) / 2,
+            height * (1 - math.tan(math.radians(pitch)) / (tan_half * height / width)) / 2,
+        )
+
     async def _send(self, tracker: PointLock, width: int, height: int) -> None:
-        x, y = tracker.center()
+        x, y = self._predict(*tracker.center(), width, height)
+        x = width / 2 + (x - width / 2) * self._response
+        y = height / 2 + (y - height / 2) * self._response
         _, _, box_width, box_height = tracker.box()
+        self._last_send = time.monotonic()
         # Current decoded-image coordinates already include the user's zoom.
-        await self.client.send_target(
+        target = (
             min(1279, max(0, round(x * 1280 / width))),
             min(719, max(0, round(y * 720 / height))),
             min(1280, max(1, round(box_width * 1280 / width))),
             min(720, max(1, round(box_height * 720 / height))),
         )
+        with contextlib.suppress(Exception):  # diagnostics must never break steering
+            self.client.note(
+                "target", tracked=[round(v) for v in tracker.center()], sent=list(target),
+                score=round(float(tracker.getTrackingScore()), 3),
+                video_age_ms=round((time.monotonic() - self._last_timestamp) * 1000),
+            )
+        await self.client.send_target(*target)
 
     async def update(
         self, frame: Image, *, zoom: float = 1.0, timestamp: float | None = None
@@ -132,6 +219,7 @@ class FirmwarePointLock:
                 await self.release("Point lock released: video is stale")
                 return self.status
             self._last_frame, self._last_timestamp = received, stamp
+            self._zoom = zoom
             height, width = frame.shape[:2]
             if (width, height) != (self.status.width, self.status.height):
                 await self.release("Point lock released: video dimensions changed")
@@ -150,6 +238,8 @@ class FirmwarePointLock:
                     await self.release("Point lock released: the point left the screen")
                 elif time.monotonic() - stamp >= IO_TIMEOUT:
                     await self.release("Point lock released: video processing is stale")
+                elif time.monotonic() - self._last_send < self._send_interval:
+                    self.status = LockStatus(LockState.LOCKED, x, y, width, height, score)
                 else:
                     async with self._lifecycle:
                         if generation == self._generation:
@@ -169,17 +259,18 @@ class FirmwarePointLock:
             await asyncio.sleep(0.025)
             if not self.client.is_connected:
                 await self.release(self.client.error or "Tracking connection lost")
-            elif time.monotonic() - min(self._last_frame, self._last_timestamp) >= IO_TIMEOUT:
+            elif time.monotonic() - self._last_frame >= IO_TIMEOUT:
                 await self.release("Point lock released: no fresh video for 400 ms")
 
     async def _check_mode(self) -> None:
         while self.active:
-            await asyncio.sleep(0.2)
+            # Once a second: frequent queries on this channel coincided with camera stalls.
+            await asyncio.sleep(1.0)
             try:
                 if not await self.client.get_mode():
                     raise RuntimeError("Camera left AI tracking mode")
             except Exception as exc:
-                await self.release(f"Tracking mode check failed: {exc}")
+                await self.release(f"Tracking mode check failed: {exc or type(exc).__name__}")
 
     async def release(self, reason: str = "Point lock released") -> None:
         """Invalidate pending work, disable AI, confirm exit, then close the private channel."""
@@ -188,6 +279,7 @@ class FirmwarePointLock:
         self.status = LockStatus(LockState.IDLE)
         self.reason = self.reason or reason
         if self._cleanup is None:
+            self.client.note("release", reason=reason)
             self._cleanup = asyncio.create_task(self._finish_release())
         try:
             await asyncio.shield(self._cleanup)
@@ -207,13 +299,26 @@ class FirmwarePointLock:
         if self._needs_disable:
             self._needs_disable = False
             try:
-                await self.client.set_mode(False)
+                try:
+                    await self.client.set_mode(False)
+                except Exception as exc:
+                    # AI mode survives disconnects and the camera can stall briefly, so try
+                    # once more; if the camera closed the channel, open a fresh one first.
+                    self.client.note("disable_retry", error=repr(exc),
+                                     connected=self.client.is_connected)
+                    if not self.client.is_connected:
+                        await self.client.close()
+                        await self.client.connect()
+                    await self.client.set_mode(False)
                 self.exit_confirmed = True
-            except Exception:
+                self.client.note("ai_mode_off_confirmed")
+            except Exception as exc:
+                self.client.note("ai_mode_off_failed", error=repr(exc))
                 self.exit_confirmed = False
                 self.reason = (
                     f"{self.reason or 'Tracking failed'}. "
-                    "Firmware exit is unconfirmed; public stop attempted"
+                    f"Firmware exit is unconfirmed ({exc or type(exc).__name__}); "
+                    "public stop attempted"
                 )
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(self._stop(), IO_TIMEOUT)

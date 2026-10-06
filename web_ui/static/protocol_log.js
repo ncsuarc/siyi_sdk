@@ -54,7 +54,7 @@ window.addEventListener('load', () => {
     const cmdFilter = document.getElementById('log-cmd');
     const hidePush = document.getElementById('log-hide-push');
     const pauseBtn = document.getElementById('log-pause');
-    const maxFrames = 1000;
+    const maxFrames = 5000;  // about 90 s of the 50 Hz attitude stream
     let frames = [];
     let lastId = 0;
     let paused = false;
@@ -112,7 +112,21 @@ window.addEventListener('load', () => {
         render();
     });
     document.getElementById('log-clear').addEventListener('click', () => { frames = []; render(); });
-    document.getElementById('log-export').addEventListener('click', () => {
-        window.downloadJSON(`siyi-frames-${Date.now()}.json`, frames);
+    document.getElementById('log-export').addEventListener('click', async () => {
+        // The SDK frames plus the firmware tracking channel and lock events, on one clock.
+        const fetchJSON = async url => {
+            try {
+                const response = await fetch(url, {cache: 'no-store'});
+                return response.ok ? await response.json() : {error: `HTTP ${response.status}`};
+            } catch (error) {
+                return {error: error.message};
+            }
+        };
+        const [tracking, settings] = await Promise.all([
+            fetchJSON('/api/debug/tracking'), fetchJSON('/api/pointing/config'),
+        ]);
+        window.downloadJSON(`siyi-frames-${Date.now()}.json`, {
+            exported_at: Date.now() / 1000, settings, frames, tracking,
+        });
     });
 });

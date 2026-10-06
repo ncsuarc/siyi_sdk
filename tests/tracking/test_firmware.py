@@ -82,7 +82,9 @@ async def test_firmware_coordinates_loss_and_no_app_steering(monkeypatch):
     for failure in ("confidence", "offscreen", "nonfinite", "resize"):
         transport = Replies()
         stop = AsyncMock()
-        lock = FirmwarePointLock(FirmwareTrackingClient(transport=transport), stop=stop)
+        lock = FirmwarePointLock(
+            FirmwareTrackingClient(transport=transport), stop=stop, send_interval=0
+        )
         await lock.start(frame, 320, 180, size=30)
         tracker = lock._tracker
         assert tracker is not None
@@ -109,6 +111,27 @@ async def test_firmware_coordinates_loss_and_no_app_steering(monkeypatch):
         assert len(transport.targets()) == count
 
 
+async def test_firmware_target_writes_are_rate_limited(monkeypatch):
+    frame = np.random.default_rng(7).integers(0, 256, (360, 640, 3), dtype=np.uint8)
+    transport = Replies()
+    lock = FirmwarePointLock(
+        FirmwareTrackingClient(transport=transport), stop=AsyncMock(), send_interval=10
+    )
+    await lock.start(frame, 320, 180, size=30)
+    tracker = lock._tracker
+    assert tracker is not None
+    monkeypatch.setattr(tracker, "update", lambda _, tracker=tracker: (True, tracker.box()))
+    monkeypatch.setattr(tracker, "center", lambda: (400, 90))
+    for _ in range(3):
+        status = await lock.update(frame)
+    assert len(transport.targets()) == 1  # only the activation target
+    assert lock.active and (status.x, status.y) == (400, 90)  # tracking still advances
+    lock._last_send -= 10
+    await lock.update(frame)
+    assert transport.targets()[-1][:2] == (800, 180)
+    await lock.release()
+
+
 async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
     from fastapi import HTTPException
 
@@ -132,7 +155,7 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             transport.mode = True
         transport.drop_enable_reply = outcome == "activation_timeout"
         client = FirmwareTrackingClient(transport=transport)
-        monkeypatch.setattr(server, "FirmwareTrackingClient", lambda _, client=client: client)
+        monkeypatch.setattr(server, "FirmwareTrackingClient", lambda *_, client=client, **__: client)
         state = server.CameraState()
         state.client = AsyncMock()
         state.ip = "192.168.144.25"
@@ -150,10 +173,13 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             assert not transport.sent_frames
             continue
         if outcome == "busy":
-            with pytest.raises(HTTPException, match="already active"):
-                await state.start_lock(0, 0)
-            assert not transport.targets()
-            assert all(p[11] == 0xA2 for p in transport.sent_frames)
+            # AI mode left on by an earlier, unconfirmed exit is switched off, then the lock starts.
+            snapshot = await state.start_lock(0, 0)
+            assert snapshot["state"] == "locked"
+            assert [p[11] for p in transport.sent_frames[:6]] == [0xA2, 0xA3, 0xA2, 0xA3, 0xA2, 0xAB]
+            assert transport.sent_frames[1][16] == 0  # the leftover mode is disabled first
+            await state.release_lock()
+            assert state.point_lock is None and not transport.mode
             continue
         if outcome == "activation_timeout":
             with pytest.raises(HTTPException):
@@ -215,7 +241,12 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             state.client.capture.assert_awaited_once()
         await lock.release()  # concurrent/repeated release is idempotent
         assert not lock.active and not transport.is_connected
-        if outcome in ("disconnect", "timeout"):
+        if outcome == "disconnect":
+            # The camera keeps AI mode across disconnects, so one fresh connection turns it off.
+            assert lock.exit_confirmed and not transport.mode
+            assert "connection" in state.lock_snapshot()["reason"]
+            assert state.client.rotate_nowait.await_count == 1  # startup stop only
+        elif outcome == "timeout":
             assert not lock.exit_confirmed
             assert "unconfirmed" in state.lock_snapshot()["reason"]
             assert state.client.rotate_nowait.await_count == 2  # startup stop + fallback
@@ -224,3 +255,20 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
         else:
             assert lock.exit_confirmed and not transport.mode
         assert len(transport.targets()) == 1
+
+
+async def test_firmware_keepalive_holds_the_camera_connection(monkeypatch):
+    # cardv drops a port 37256 client that sends no 0x80 for over 4 s.
+    from siyi_sdk import firmware_tracking
+
+    monkeypatch.setattr(firmware_tracking, "KEEPALIVE_INTERVAL", 0.01)
+    transport = Replies()
+    client = FirmwareTrackingClient(transport=transport)
+    await client.connect()
+    await asyncio.sleep(0.05)
+    keepalives = [p for p in transport.sent_frames if p[11] == 0x80]
+    assert keepalives and all(p[16:-4] == b"\x01" and p[4] == 1 for p in keepalives)
+    await client.close()
+    count = len(transport.sent_frames)
+    await asyncio.sleep(0.03)
+    assert len(transport.sent_frames) == count  # stops with the connection

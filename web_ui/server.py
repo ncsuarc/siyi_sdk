@@ -10,6 +10,7 @@ import json
 import os
 import time
 import math
+import itertools
 from collections import deque
 from ipaddress import IPv4Address
 from typing import Optional, AsyncGenerator, Any, Literal
@@ -111,6 +112,9 @@ class CameraState:
         self.zoom_refresh_task: Optional[asyncio.Task] = None
         # Point lock steers the gimbal from the video; raw frames are kept to start a lock.
         self.point_lock: Optional[GimbalPointLock | FirmwarePointLock] = None
+        # Firmware tracking channel (port 37256) frames and lock events, for the protocol export.
+        self.tracking_log: deque = deque(maxlen=5000)
+        self.tracking_log_ids = itertools.count(1)
         self.tracking_lock = asyncio.Lock()
         self.lock_reason: Optional[str] = None
         self.lock_exit_confirmed = True
@@ -442,13 +446,18 @@ class CameraState:
             await self._firmware_emergency_stop()
             self.motion_deadlines.pop("rotate", None)
             lock = FirmwarePointLock(
-                FirmwareTrackingClient(self.ip), stop=self._firmware_emergency_stop, model=cfg.lock_model,
+                FirmwareTrackingClient(self.ip, trace=self.trace_tracking),
+                stop=self._firmware_emergency_stop, model=cfg.lock_model,
+                # No attitude-based delay correction: with an unreliable pitch sign (inverted
+                # bench mount) it drove the gimbal to its limit. Damp with the response instead.
+                response=min(cfg.lock_response, 1.0),
             )
             self.point_lock = lock
             self.lock_reason = None
             try:
                 await lock.start(image, (x + 0.5) * width, (y + 0.5) * height,
-                                 size=max(40, width // 20), timestamp=self.latest_image_time)
+                                 size=max(40, width // 20), timestamp=self.latest_image_time,
+                                 zoom=self.zoom or 1.0)
             except Exception as exc:
                 self.lock_reason = lock.reason or f"Firmware tracking unavailable: {str(exc) or type(exc).__name__}"
                 lock.reason = self.lock_reason
@@ -475,6 +484,10 @@ class CameraState:
         self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
         return self.lock_snapshot()
+
+    def trace_tracking(self, event: str, fields: dict) -> None:
+        self.tracking_log.append({"id": next(self.tracking_log_ids), "t": time.time(),
+                                  "event": event, **fields})
 
     async def _firmware_emergency_stop(self) -> None:
         if self.client:
@@ -544,6 +557,13 @@ class CameraState:
                     await client.rotate_nowait(0, 0)
                 except Exception:
                     pass
+        # A failed axis fit gives a garbage sign and delays; keep the previous settings instead.
+        axes = [("yaw", result.yaw), ("pitch", result.pitch)]
+        bad = [name for name, r in axes if r is not None and (r.fit_error_deg > 1.0 or r.command_delay_s > 1.0)]
+        if bad:
+            raise HTTPException(status_code=422, detail=(
+                f"Measurement failed on {' and '.join(bad)}; settings were not changed. Level the camera "
+                "so it can tilt both ways, aim at a detailed, still scene and measure again."))
         cfg = self.pointing
         model = result.model
         cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch = (round(v, 4) for v in model.deg_per_unit)
@@ -1207,6 +1227,10 @@ async def debug_frames(since: int = 0):
     if not state.transport:
         return {"last_id": 0, "frames": []}
     return {"last_id": state.transport.last_id, "frames": state.transport.since(since)}
+
+@app.get("/api/debug/tracking")
+async def debug_tracking(since: int = 0):
+    return [record for record in state.tracking_log if record["id"] > since]
 
 @app.websocket("/ws/attitude")
 async def websocket_attitude(websocket: WebSocket):

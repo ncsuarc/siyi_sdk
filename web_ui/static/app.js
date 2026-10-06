@@ -1073,7 +1073,6 @@ class SiyiApp {
     showLockControlOptions() {
         const fields = this.pointingFields();
         const firmware = fields.control.value === 'firmware';
-        fields.response.disabled = firmware;
         fields.speed.disabled = firmware;
         document.getElementById('firmware-lock-hint').hidden = !firmware;
     }
@@ -1082,11 +1081,26 @@ class SiyiApp {
         // The server forgets settings on restart, so this browser keeps a copy.
         try {
             const saved = JSON.parse(store.get('pointingConfig') || 'null');
-            const config = saved
-                ? await this.request('/api/pointing/config', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(saved)
-                })
-                : await this.request('/api/pointing/config');
+            const send = body => this.request('/api/pointing/config', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+            });
+            let config;
+            if (!saved) {
+                config = await this.request('/api/pointing/config');
+            } else {
+                try {
+                    config = await send(saved);
+                } catch (e) {
+                    // A failed measurement can leave out-of-range values, and then the server
+                    // rejects everything (lock steering included). Keep the choices, drop the measurement.
+                    const {deg_per_unit_yaw, deg_per_unit_pitch, command_delay_ms, frame_delay_ms,
+                        calibrated, ...choices} = saved;
+                    config = await send(choices);
+                    store.set('pointingConfig', JSON.stringify(config));
+                    this.notify(`Saved loop timing was invalid (${e.message}) and was cleared; your other ` +
+                        'settings were kept. Measure loop timing again if you need it.', true);
+                }
+            }
             this.showPointingConfig(config);
         } catch (e) {
             console.warn('Pointing settings unavailable', e);
@@ -1137,7 +1151,12 @@ class SiyiApp {
     connectWS() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         this.ws = new WebSocket(`${protocol}//${window.location.host}/ws/attitude`);
-        
+        this.ws.onopen = () => {
+            // A restarted server is back on defaults; send this browser's saved settings again.
+            if (this.wsOpened) this.loadPointingConfig();
+            this.wsOpened = true;
+        };
+
         this.ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
