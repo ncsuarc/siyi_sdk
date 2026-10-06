@@ -5,6 +5,11 @@ connection alive, and tracks on the camera's own 1280x720 H.265 stream (0x90),
 which arrives with far less delay than RTSP. That stream only becomes
 decodable at a keyframe (about every 2.5 s), so the link stays up for as long
 as firmware steering is in use, and each lock only switches AI mode.
+
+TCP delivers that stream in bursts (many frames at once, then nothing for a few
+hundred ms), so a frame's arrival time says little about when it was captured.
+Each frame carries a counter, though, and the camera numbers frames at a steady
+rate. :class:`CaptureClock` turns the counter into a capture time.
 """
 
 from __future__ import annotations
@@ -19,15 +24,52 @@ from typing import Any
 
 import numpy as np
 
-from siyi_sdk.firmware_tracking import FirmwareTrackingClient, Trace
+from siyi_sdk.firmware_tracking import CANCEL_SETTLE, FirmwareTrackingClient, Trace
 
 logger = logging.getLogger(__name__)
 
-# Decoded frame (BGR, 1280x720) and its packet's monotonic arrival time.
+# Decoded frame (BGR, 1280x720) and its estimated monotonic capture time (see CaptureClock).
 FrameSink = Callable[[np.ndarray, float], Awaitable[None]]
 
 RETRY_DELAY = 2.0
 VIDEO_STALL = 3.0  # reconnect when no video packet arrives for this long
+VIDEO_FPS = 25.0  # the camera's stream; its frame counter measured 25.013 per second
+CLOCK_WINDOW = 3.0  # seconds of arrivals CaptureClock looks back over
+
+
+class CaptureClock:
+    """Estimate when each video frame was captured from its frame counter.
+
+    The counter gives the spacing between frames exactly; only the offset between the
+    camera's clock and ours is unknown. A frame's ``arrival - index / fps`` is that offset
+    plus however long the frame sat in the pipe, so the smallest value over a short window
+    is the offset: the delay of the least-held frame, which is what arrival time meant
+    before bursts. The window is short enough to follow clock drift (about 6 ms over 40 s
+    measured). Estimates never go backwards, so a lock's "no newer frame" check holds.
+    """
+
+    def __init__(self, fps: float = VIDEO_FPS, window: float = CLOCK_WINDOW) -> None:
+        """Start with no history; ``fps`` is the camera's nominal frame rate."""
+        self._fps = fps
+        self._window = window
+        self._max_jump = 5 * fps  # a counter that skips further than this has restarted
+        self._offsets: deque[tuple[float, float]] = deque()  # (arrival, offset), offsets rising
+        self._index: int | None = None
+        self._capture = 0.0
+
+    def update(self, index: int, arrival: float) -> float:
+        """Return the estimated capture time of frame ``index``, which arrived at ``arrival``."""
+        if self._index is not None and not 0 <= index - self._index <= self._max_jump:
+            self._offsets.clear()  # the counter restarted (a new stream); old offsets don't apply
+        self._index = index
+        offset = arrival - index / self._fps
+        while self._offsets and self._offsets[-1][1] >= offset:
+            self._offsets.pop()
+        self._offsets.append((arrival, offset))
+        while self._offsets[0][0] < arrival - self._window:
+            self._offsets.popleft()
+        self._capture = max(index / self._fps + self._offsets[0][1], self._capture + 1e-6)
+        return self._capture
 
 
 class FirmwareLink:
@@ -44,7 +86,9 @@ class FirmwareLink:
         self._trace = trace
         self.client: FirmwareTrackingClient | None = None
         self._task: asyncio.Task[None] | None = None
-        self._packets: deque[tuple[int, bytes, float]] = deque()
+        # (frame counter, H.265 access unit, arrival time, estimated capture time)
+        self._packets: deque[tuple[int, bytes, float, float]] = deque()
+        self._clock = CaptureClock()
         self._wake = asyncio.Event()
         self._decoder: Any = None
         self._last_packet = 0.0
@@ -82,7 +126,7 @@ class FirmwareLink:
 
     def _queue(self, index: int, data: bytes, arrival: float) -> None:
         self._last_packet = arrival
-        self._packets.append((index, data, arrival))
+        self._packets.append((index, data, arrival, self._clock.update(index, arrival)))
         self._wake.set()
 
     async def _close_client(self) -> None:
@@ -106,12 +150,22 @@ class FirmwareLink:
                 self._decoder = av.CodecContext.create("hevc", "r")
                 self._decoder.thread_type = "SLICE"  # frame threading would add frames of delay
                 self._packets.clear()
+                self._clock = CaptureClock()
                 self.last_frame_time = 0.0  # not ready until this connection delivers video
                 client = FirmwareTrackingClient(self.ip, trace=self._trace, on_video=self._queue)
                 await client.connect()
                 self.client = client
+                # The stream flag survives disconnects; stop any leftover stream so the
+                # mode replies below are not queued behind video.
+                await client.stop_video()
+                await asyncio.sleep(0.3)
                 if await client.get_mode():
                     self._note("ai_mode_was_left_on")
+                    # Whatever target the gimbal still holds is dropped the way the AI module
+                    # drops it: a "canceled" target, then AI mode off.
+                    with contextlib.suppress(Exception):
+                        await client.cancel_target()
+                        await asyncio.sleep(CANCEL_SETTLE)
                 await client.set_mode(False)
                 await client.start_video()
                 self._last_packet = time.monotonic()
@@ -151,19 +205,21 @@ class FirmwareLink:
             started = time.monotonic()
             image = await asyncio.to_thread(self._decode, batch)
             # Per delivery: how many packets were waiting, decode time, and packet age.
+            # lag_ms: how much longer the newest frame sat in the pipe than the window's best.
             self._note("video_delivered", packets=len(batch), first=batch[0][0], last=batch[-1][0],
                        decode_ms=round((time.monotonic() - started) * 1000, 1),
                        age_ms=round((time.monotonic() - batch[-1][2]) * 1000, 1),
+                       lag_ms=round((batch[-1][2] - batch[-1][3]) * 1000, 1),
                        picture=image is not None)
             if image is not None:
                 self.last_frame_time = time.monotonic()
-                await self._on_frame(image, batch[-1][2])
+                await self._on_frame(image, batch[-1][3])
 
-    def _decode(self, batch: list[tuple[int, bytes, float]]) -> np.ndarray | None:
+    def _decode(self, batch: list[tuple[int, bytes, float, float]]) -> np.ndarray | None:
         import av
 
         latest = None
-        for _, data, _ in batch:
+        for _, data, _, _ in batch:
             try:
                 for frame in self._decoder.decode(av.Packet(data)):
                     latest = frame

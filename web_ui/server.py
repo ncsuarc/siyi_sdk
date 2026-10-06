@@ -67,6 +67,11 @@ GLOBAL_CONFIG = {
     "port": 8082,
 }
 
+# While the firmware link streams the camera's video, query the camera's status this rarely.
+# About half of the 1 Hz status queries were followed within 30 ms by a burst of that video,
+# and the SIYI AI module sends the camera nothing but a record-status request.
+LINK_STATUS_INTERVAL = 10.0
+
 class CameraState:
     def __init__(self):
         self.client: Optional[SIYIClient] = None
@@ -177,12 +182,13 @@ class CameraState:
             try:
                 if self.client and self.ip:
                     try:
-                        # Attempt to connect and ping
-                        if not self.is_connected:
-                            await asyncio.wait_for(self.client.connect(), timeout=5.0)
-                        
-                        # Allow all three SDK attempts (2s each) and their backoff.
-                        self.firmware_version = await asyncio.wait_for(self.client.get_firmware_version(), timeout=8.0)
+                        if not self.link_telemetry_alive():
+                            # Attempt to connect and ping
+                            if not self.is_connected:
+                                await asyncio.wait_for(self.client.connect(), timeout=5.0)
+
+                            # Allow all three SDK attempts (2s each) and their backoff.
+                            self.firmware_version = await asyncio.wait_for(self.client.get_firmware_version(), timeout=8.0)
                         self.connection_error = None
                         consecutive_failures = 0
                         
@@ -218,7 +224,17 @@ class CameraState:
                     await self.sync_firmware_link()
                     # A video backend failure must not mark a responding camera offline.
                     # Retry video independently, including after a failed start.
-                    if self.is_connected and self.live_enabled and self.stream and not self.stream.is_running:
+                    # While the firmware link delivers video, RTSP frames are discarded; stop
+                    # decoding them, which competed with the link for CPU. Resume RTSP otherwise.
+                    link_live = self.firmware_link is not None and self.firmware_link.ready
+                    if link_live and self.stream and self.stream.is_running:
+                        logger.info("Pausing RTSP: the firmware link provides the video")
+                        try:
+                            await asyncio.wait_for(self.stream.stop(), timeout=5.0)
+                        except Exception as e:
+                            logger.warning(f"RTSP pause failed: {e}")
+                    elif (self.is_connected and self.live_enabled and self.stream
+                          and not self.stream.is_running and not link_live):
                         try:
                             await self.toggle_stream(True)
                         except Exception as e:
@@ -265,8 +281,28 @@ class CameraState:
                                               trace=self.trace_tracking)
             self.firmware_link.start()
 
-    async def _on_link_frame(self, image, arrival: float) -> None:
-        await self._on_frame(SimpleNamespace(frame=image, timestamp=arrival))
+    def link_live(self) -> bool:
+        """Whether the firmware link is delivering the camera's video."""
+        link = self.firmware_link
+        return link is not None and link.ready
+
+    def link_telemetry_alive(self) -> bool:
+        """Whether attitude telemetry shows the camera is up while the firmware link streams.
+
+        The watchdog's firmware-version query coincides with video stalls on that link, so
+        it is skipped while the 50 Hz attitude stream proves the camera is answering.
+        """
+        return (self.is_connected and self.firmware_version is not None and self.link_live()
+                and time.monotonic() - self.attitude_time < 1.0)
+
+    def status_due(self) -> bool:
+        """Whether the status poll should query the camera now (rarely, while the link streams)."""
+        if not self.link_live():
+            return True
+        return not self.status_time or time.monotonic() - self.status_time >= LINK_STATUS_INTERVAL
+
+    async def _on_link_frame(self, image, captured: float) -> None:
+        await self._on_frame(SimpleNamespace(frame=image, timestamp=captured))
 
     async def _on_rtsp_frame(self, frame):
         # While the firmware stream delivers, RTSP frames would mix two pictures with
@@ -385,7 +421,7 @@ class CameraState:
 
     async def poll_status(self):
         while True:
-            if self.is_connected:
+            if self.is_connected and self.status_due():
                 try:
                     await self.refresh_status()
                 except Exception:
@@ -411,7 +447,8 @@ class CameraState:
             "zoom": self.zoom,
             "zoom_max": self.zoom_max,
             "lock": self.lock_snapshot(),
-            "status_fresh": self.is_connected and age is not None and age < 3 and not self.status_error,
+            "status_fresh": (self.is_connected and age is not None and not self.status_error
+                             and age < 3 + (LINK_STATUS_INTERVAL if self.link_live() else 0)),
             "status_error": self.status_error,
             "latency": {
                 "camera_rtt_ms": self.rtt_samples[-1] if self.rtt_samples else None,
@@ -495,6 +532,8 @@ class CameraState:
                 link.client if link is not None
                 else FirmwareTrackingClient(self.ip, trace=self.trace_tracking),
                 owns_connection=link is None,
+                # The camera's own stream arrives in bursts with gaps of up to ~650 ms.
+                video_timeout=1.2 if link is not None else 0.4,
                 stop=self._firmware_emergency_stop, model=cfg.lock_model,
                 # No attitude-based delay correction: with an unreliable pitch sign (inverted
                 # bench mount) it drove the gimbal to its limit. Damp with the response instead.

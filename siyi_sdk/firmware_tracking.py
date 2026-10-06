@@ -9,13 +9,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import struct
+import sys
 import time
-from collections.abc import Callable
+import zlib
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
 from siyi_sdk.transport.base import AbstractTransport
-from siyi_sdk.transport.tcp import TCPTransport
+from siyi_sdk.transport.threaded_tcp import ThreadedTCPTransport
 
 IO_TIMEOUT = 0.4
 # Accepting a connection has taken up to ~400 ms on hardware; it precedes any mode change.
@@ -25,6 +27,8 @@ CONNECT_TIMEOUT = 1.5
 KEEPALIVE_INTERVAL = 1.0
 # Replies usually take 3-50 ms, but the camera has stalled for ~800 ms while otherwise healthy.
 REPLY_TIMEOUT = 1.5
+# The AI module sends a "canceled" target (status 3), waits 60 ms, then switches AI mode off.
+CANCEL_SETTLE = 0.06
 _MAGIC = b"\x55\x66\xaa\xbb"
 _MAX_PAYLOAD = 4096 - 20  # receive buffer in the inspected camera firmware
 # Received packets can be larger: 0x90 carries whole encoded frames (cardv caps them near 358 KB).
@@ -41,18 +45,55 @@ def _no_trace(event: str, fields: dict[str, Any]) -> None:
     pass
 
 
+def disable_delayed_ack(sock: Any) -> bool:
+    """Make Windows acknowledge every received TCP segment at once.
+
+    The camera appears to hold each video frame's last partial segment until
+    earlier data is acknowledged (Nagle), while Windows delays acknowledgements
+    by up to 200 ms; together that bunches the 0x90 stream into bursts. Returns
+    whether the option was applied (Windows only).
+    """
+    if sys.platform != "win32" or sock is None:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    sio_tcp_set_ack_frequency = 0x98000017  # _WSAIOW(IOC_VENDOR, 23)
+    frequency = wintypes.DWORD(1)
+    returned = wintypes.DWORD(0)
+    wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
+    wsa_ioctl.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                          ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                          ctypes.c_void_p, ctypes.c_void_p]
+    result = wsa_ioctl(sock.fileno(), sio_tcp_set_ack_frequency, ctypes.byref(frequency),
+                       ctypes.sizeof(frequency), None, 0, ctypes.byref(returned), None, None)
+    return result == 0
+
+
 def _ms(started: float) -> float:
     return round((time.monotonic() - started) * 1000, 1)
 
 
+async def _stamped(chunks: AsyncIterator[bytes]) -> AsyncIterator[tuple[bytes, float]]:
+    """Pair chunks from a transport that doesn't stamp them with the time each was read."""
+    async for chunk in chunks:
+        yield chunk, time.monotonic()
+
+
+# Bit-reversal of every byte value, to compute the MSB-first CRC with zlib's LSB-first one.
+_REVERSED_BYTES = bytes(int(f"{value:08b}"[::-1], 2) for value in range(256))
+
+
 def firmware_crc32(data: bytes) -> int:
-    """Return the firmware's MSB-first CRC32, seed 0, polynomial 0x04C11DB7."""
-    crc = 0
-    for byte in data:
-        crc ^= byte << 24
-        for _ in range(8):
-            crc = ((crc << 1) ^ (0x04C11DB7 if crc & 0x80000000 else 0)) & 0xFFFFFFFF
-    return crc
+    """Return the firmware's MSB-first CRC32, seed 0, polynomial 0x04C11DB7.
+
+    zlib computes the same polynomial bit-reflected with an inverted register;
+    reflecting the input bytes and the result, and undoing the inversion, gives
+    the firmware's CRC in C. A pure-Python loop took ~7 ms per 5 KB video frame,
+    enough to make the dashboard fall about a second behind the 0x90 stream.
+    """
+    register = zlib.crc32(bytes(data).translate(_REVERSED_BYTES), 0xFFFFFFFF) ^ 0xFFFFFFFF
+    return int(f"{register:032b}"[::-1], 2)
 
 
 def encode_frame(command: int, payload: bytes, sequence: int, *, flags: int = 1) -> bytes:
@@ -141,8 +182,13 @@ class FirmwareTrackingClient:
         ``trace`` receives every frame, request outcome and connection event.
         ``on_video`` receives the camera's 0x90 video frames once
         :meth:`start_video` has requested them (they are not traced one by one).
+        The default transport reads in its own thread, as the AI module does, so the
+        arrival time passed to ``on_video`` is when the data came in, not when the
+        event loop got to it.
         """
-        self._transport = transport or TCPTransport(ip, 37256, connect_timeout=CONNECT_TIMEOUT)
+        self._transport = transport or ThreadedTCPTransport(
+            ip, 37256, connect_timeout=CONNECT_TIMEOUT
+        )
         self._reader: asyncio.Task[None] | None = None
         self._keepalive: asyncio.Task[None] | None = None
         self._requests = asyncio.Lock()
@@ -184,7 +230,10 @@ class FirmwareTrackingClient:
         except Exception as exc:
             self._emit("connect_failed", ms=_ms(started), error=repr(exc))
             raise
-        self._emit("connected", ms=_ms(started))
+        quick_ack = False
+        with contextlib.suppress(Exception):
+            quick_ack = disable_delayed_ack(getattr(self._transport, "socket", None))
+        self._emit("connected", ms=_ms(started), quick_ack=quick_ack)
         self._reader = asyncio.create_task(self._read())
         self._keepalive = asyncio.create_task(self._keep_alive())
 
@@ -226,10 +275,13 @@ class FirmwareTrackingClient:
     async def _read(self) -> None:
         parser = FirmwareFrameParser()
         how = "eof"  # how the stream ended, for the trace
+        # A transport that reads in its own thread stamps each chunk when it arrives; otherwise
+        # stamp it as it is taken from the stream.
+        timed = getattr(self._transport, "stream_timed", None)
+        chunks = timed() if timed is not None else _stamped(self._transport.stream())
         try:
-            async for chunk in self._transport.stream():
+            async for chunk, arrival in chunks:
                 discarded = parser.discarded
-                arrival = time.monotonic()
                 for frame in parser.feed(chunk):
                     if frame.command == 0x90 and len(frame.payload) > 6:
                         # 6-byte header: little-endian frame counter, then 01 00.
@@ -346,4 +398,17 @@ class FirmwareTrackingClient:
         await asyncio.wait_for(
             self._send(0xAB, struct.pack("<HHHHBB", x, y, width, height, 255, 4), flags=0),
             IO_TIMEOUT,
+        )
+
+    async def cancel_target(self) -> None:
+        """Send the "canceled" target (status 3) the AI module sends before switching AI off.
+
+        Position and size are zero and the type is the any-object value this client's targets
+        carry. Only valid while AI mode is on: with it off the camera answers a target with a
+        one-byte ``02``, which marks this connection failed.
+        """
+        if not self.is_connected:
+            raise ConnectionError(self.error or "Tracking channel is not connected")
+        await asyncio.wait_for(
+            self._send(0xAB, struct.pack("<HHHHBB", 0, 0, 0, 0, 255, 3), flags=0), IO_TIMEOUT
         )

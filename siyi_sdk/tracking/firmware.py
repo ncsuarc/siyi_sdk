@@ -9,6 +9,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from siyi_sdk.firmware_tracking import (
+    CANCEL_SETTLE,
     CONNECT_TIMEOUT,
     IO_TIMEOUT,
     REPLY_TIMEOUT,
@@ -24,9 +25,13 @@ class FirmwarePointLock:
     """Send observed scene coordinates; the gimbal does all steering and zoom compensation.
 
     Loss, off-screen points, stale video and connection failure release the lock.
-    Each instance is single-use. It never replays targets or falls back to the
-    app controller, and reconnects only to switch AI mode off after the camera
-    closed the channel. ``stop`` is only an emergency public-SDK stop.
+    So does AI mode being switched off behind its back: the camera answers a target with
+    ``02`` then, which the client treats as a failed connection; the lock does not poll
+    the mode (the SIYI AI module never does). Each instance is single-use. It never
+    replays targets or falls back to the app controller, and reconnects only to switch
+    AI mode off after the camera closed the channel. Like the AI module, it ends a lock
+    with a "canceled" target before switching AI mode off. ``stop`` is only an emergency
+    public-SDK stop.
     """
 
     control = "firmware"
@@ -45,6 +50,7 @@ class FirmwarePointLock:
         hfov_deg: float = 81.0,
         response: float = 1.0,
         owns_connection: bool = True,
+        video_timeout: float = IO_TIMEOUT,
     ) -> None:
         """Create an idle controller using the existing fixed-scene point tracker.
 
@@ -78,16 +84,20 @@ class FirmwarePointLock:
         # False when a FirmwareLink keeps ``client`` connected: the lock then neither
         # connects nor closes it, and only switches AI mode.
         self._owns_connection = owns_connection
+        # Release after this long without a processed frame. The camera's own stream can
+        # arrive in bursts; meanwhile its controller keeps steering to the last target.
+        self._video_timeout = video_timeout
         self._tracker: PointLock | None = None
         self._lifecycle = asyncio.Lock()
         self._update_lock = asyncio.Lock()
         self._generation = 0
         self._needs_disable = False
         self._used = False
+        # Whether a target has gone out, so there is something to cancel (and AI mode is on).
+        self._target_sent = False
         self._last_frame = 0.0
         self._last_timestamp = 0.0
         self._watchdog: asyncio.Task[None] | None = None
-        self._health: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
         self.status = LockStatus(LockState.IDLE)
         self.reason: str | None = None
@@ -161,7 +171,6 @@ class FirmwarePointLock:
                 # No frames are processed during activation; time video freshness from now.
                 self._last_frame = time.monotonic()
                 self._watchdog = asyncio.create_task(self._watch())
-                self._health = asyncio.create_task(self._check_mode())
                 self.client.note("locked")
             except BaseException as exc:
                 self.client.note("lock_start_failed", error=repr(exc))
@@ -210,6 +219,7 @@ class FirmwarePointLock:
                 video_age_ms=round((time.monotonic() - self._last_timestamp) * 1000),
             )
         await self.client.send_target(*target)
+        self._target_sent = True
         self.last_target, self.last_target_time = target, time.monotonic()
 
     async def update(
@@ -271,18 +281,10 @@ class FirmwarePointLock:
             await asyncio.sleep(0.025)
             if not self.client.is_connected:
                 await self.release(self.client.error or "Tracking connection lost")
-            elif time.monotonic() - self._last_frame >= IO_TIMEOUT:
-                await self.release("Point lock released: no fresh video for 400 ms")
-
-    async def _check_mode(self) -> None:
-        while self.active:
-            # Once a second: frequent queries on this channel coincided with camera stalls.
-            await asyncio.sleep(1.0)
-            try:
-                if not await self.client.get_mode():
-                    raise RuntimeError("Camera left AI tracking mode")
-            except Exception as exc:
-                await self.release(f"Tracking mode check failed: {exc or type(exc).__name__}")
+            elif time.monotonic() - self._last_frame >= self._video_timeout:
+                await self.release(
+                    f"Point lock released: no fresh video for {self._video_timeout * 1000:.0f} ms"
+                )
 
     async def release(self, reason: str = "Point lock released") -> None:
         """Invalidate pending work, disable AI, confirm exit, then close the private channel."""
@@ -300,10 +302,9 @@ class FirmwarePointLock:
             raise
 
     async def _finish_release(self) -> None:
-        for task in (self._watchdog, self._health):
-            if task is not None:
-                task.cancel()
-        self._watchdog = self._health = None
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+        self._watchdog = None
         async with self._lifecycle:
             await self._disable()
 
@@ -311,6 +312,13 @@ class FirmwarePointLock:
         if self._needs_disable:
             self._needs_disable = False
             try:
+                if self._target_sent:
+                    # End as the AI module does: a "canceled" target, then AI mode off. A dead
+                    # channel has nothing to cancel, so any failure here is ignored.
+                    self._target_sent = False
+                    with contextlib.suppress(Exception):
+                        await self.client.cancel_target()
+                        await asyncio.sleep(CANCEL_SETTLE)
                 try:
                     await self.client.set_mode(False)
                 except Exception as exc:

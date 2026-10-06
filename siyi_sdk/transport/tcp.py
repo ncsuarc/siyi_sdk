@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from collections.abc import AsyncIterator
-from typing import Final
+from typing import Any, Final
 
 import structlog
 
@@ -106,6 +106,11 @@ class TCPTransport(AbstractTransport):
 
         self._connected = False
         logger.info("disconnected", transport="tcp")
+
+    @property
+    def socket(self) -> Any:
+        """The connected socket object, or None (for socket options and diagnostics)."""
+        return self._writer.get_extra_info("socket") if self._writer else None
 
     async def abort(self) -> None:
         """Drop the connection at once with a TCP reset, discarding unsent data.

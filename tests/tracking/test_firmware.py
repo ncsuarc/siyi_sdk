@@ -27,6 +27,7 @@ class Replies(MockTransport):
     mode = False
     silence = False
     drop_enable_reply = False
+    reject_targets = False  # answer a target sent while AI mode is off with 02, as the camera does
 
     async def send(self, data):
         await super().send(data)
@@ -35,12 +36,22 @@ class Replies(MockTransport):
             self.mode = bool(payload[0])
             if self.mode and self.drop_enable_reply:
                 return
+        if command == 0xAB and self.reject_targets and not self.mode:
+            self.queue_response(encode_frame(0xAB, b"", 901, flags=2))
         if not self.silence and command in (0xA2, 0xA3):
             # The camera allocates its own sequence number.
             self.queue_response(encode_frame(command, bytes([self.mode]), 900, flags=2))
 
-    def targets(self):
+    def _targets(self):
         return [struct.unpack("<HHHHBB", p[16:-4]) for p in self.sent_frames if p[11] == 0xAB]
+
+    def targets(self):
+        """Tracking targets (state 4); the canceled target a lock ends with is not one."""
+        return [t for t in self._targets() if t[5] == 4]
+
+    def cancels(self):
+        """Canceled targets (state 3)."""
+        return [t for t in self._targets() if t[5] == 3]
 
 
 def test_firmware_vectors_and_tcp_parser():
@@ -105,6 +116,9 @@ async def test_firmware_coordinates_loss_and_no_app_steering(monkeypatch):
         await lock.update(frame[:200] if failure == "resize" else frame)
         assert not lock.active and not transport.mode and lock.exit_confirmed
         assert len(transport.targets()) == count
+        # Like the AI module, end with a canceled target, then AI off (and its confirmation).
+        assert transport.cancels() == [(0, 0, 0, 0, 255, 3)]
+        assert [p[11] for p in transport.sent_frames[-3:]] == [0xAB, 0xA3, 0xA2]
         assert not transport.is_connected
         assert all(p[11] in (0xA2, 0xA3, 0xAB) for p in transport.sent_frames)
         await lock.update(frame)
@@ -180,11 +194,13 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             assert transport.sent_frames[1][16] == 0  # the leftover mode is disabled first
             await state.release_lock()
             assert state.point_lock is None and not transport.mode
+            assert len(transport.cancels()) == 1
             continue
         if outcome == "activation_timeout":
             with pytest.raises(HTTPException):
                 await state.start_lock(0, 0)
             assert not transport.targets() and not transport.mode and not transport.is_connected
+            assert not transport.cancels()  # no target went out, so there is nothing to cancel
             assert state.lock_exit_confirmed
             continue
         snapshot = await state.start_lock(0, 0)
@@ -255,6 +271,8 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
         else:
             assert lock.exit_confirmed and not transport.mode
         assert len(transport.targets()) == 1
+        # A lost connection has nothing to cancel; every other exit ends with one canceled target.
+        assert len(transport.cancels()) == (0 if outcome == "disconnect" else 1)
 
 
 async def test_firmware_keepalive_holds_the_camera_connection(monkeypatch):
@@ -272,3 +290,105 @@ async def test_firmware_keepalive_holds_the_camera_connection(monkeypatch):
     count = len(transport.sent_frames)
     await asyncio.sleep(0.03)
     assert len(transport.sent_frames) == count  # stops with the connection
+
+
+async def test_firmware_lock_does_not_poll_ai_mode():
+    # The SIYI AI module never queries the mode. The lock used to every second, which coincided
+    # with camera stalls; only the activation's own two queries (mode, then confirmation) remain.
+    frame = np.random.default_rng(7).integers(0, 256, (360, 640, 3), dtype=np.uint8)
+    transport = Replies()
+    lock = FirmwarePointLock(
+        FirmwareTrackingClient(transport=transport),
+        stop=AsyncMock(),
+        send_interval=0,
+        video_timeout=5,
+    )
+    await lock.start(frame, 320, 180, size=30)
+    await asyncio.sleep(1.2)  # longer than the old polling period
+    assert lock.active
+    assert [p[11] for p in transport.sent_frames].count(0xA2) == 2
+    await lock.release()
+
+
+async def test_firmware_lock_ends_when_the_camera_rejects_targets(monkeypatch):
+    # With no polling, AI mode being switched off elsewhere shows up as the camera's 02 answer.
+    frame = np.random.default_rng(7).integers(0, 256, (360, 640, 3), dtype=np.uint8)
+    transport = Replies()
+    transport.reject_targets = True
+    lock = FirmwarePointLock(
+        FirmwareTrackingClient(transport=transport),
+        stop=AsyncMock(),
+        send_interval=0,
+        video_timeout=5,
+    )
+    await lock.start(frame, 320, 180, size=30)
+    tracker = lock._tracker
+    assert tracker is not None
+    monkeypatch.setattr(tracker, "update", lambda _, tracker=tracker: (True, tracker.box()))
+    transport.mode = False  # something else switched AI mode off
+    await lock.update(frame)
+    await asyncio.sleep(0.1)  # the watchdog looks every 25 ms
+    assert not lock.active
+    assert "AI mode is disabled" in lock.reason
+    assert lock.exit_confirmed and not transport.is_connected
+    assert not transport.cancels()  # the channel was already marked failed
+
+
+async def test_cancel_target_wire_format_and_needs_a_connection():
+    transport = Replies()
+    client = FirmwareTrackingClient(transport=transport)
+    with pytest.raises(ConnectionError):
+        await client.cancel_target()
+    await client.connect()
+    await client.cancel_target()
+    canceled = struct.pack("<HHHHBB", 0, 0, 0, 0, 255, 3)  # as the AI module sends on AI off
+    assert transport.sent_frames[-1] == encode_frame(0xAB, canceled, 1, flags=0)
+    await client.close()
+
+
+def _video_packet(index, data=b"nal"):
+    payload = struct.pack("<IH", index, 1) + data
+    header = b"\x55\x66\xaa\xbb" + struct.pack("<BIHB", 2, len(payload), index, 0x90)
+    packet = header + struct.pack("<I", firmware_crc32(header)) + payload
+    return packet + struct.pack("<I", firmware_crc32(packet))
+
+
+class Stamped(MockTransport):
+    """Hands over each chunk with its own arrival time, as the threaded transport does."""
+
+    def __init__(self, chunks):
+        super().__init__()
+        self.chunks = chunks
+
+    async def stream_timed(self):
+        for chunk in self.chunks:
+            yield chunk
+        await asyncio.sleep(3600)
+
+
+async def test_client_uses_the_arrival_times_a_transport_provides():
+    got = []
+    transport = Stamped(
+        [(_video_packet(1) + _video_packet(2), 123.5), (_video_packet(3), 124.25)]
+    )
+    client = FirmwareTrackingClient(
+        transport=transport, on_video=lambda i, _, t: got.append((i, t))
+    )
+    await client.connect()
+    await asyncio.sleep(0.05)
+    assert got == [(1, 123.5), (2, 123.5), (3, 124.25)]
+    await client.close()
+
+
+async def test_client_stamps_chunks_from_a_plain_transport_when_read():
+    got = []
+    transport = MockTransport()
+    client = FirmwareTrackingClient(
+        transport=transport, on_video=lambda i, _, t: got.append((i, t))
+    )
+    await client.connect()
+    before = time.monotonic()
+    transport.queue_response(_video_packet(5))
+    await asyncio.sleep(0.05)
+    assert [i for i, _ in got] == [5] and before <= got[0][1] <= time.monotonic()
+    await client.close()
