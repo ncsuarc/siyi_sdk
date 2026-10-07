@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import dataclasses
 import logging
 import json
 import os
@@ -166,9 +167,10 @@ class CameraState:
         self.video_log: deque = deque(maxlen=6000)
         self.loop_lag_ms: deque = deque(maxlen=600)  # (time.time(), lag) every 100 ms
         self.wifi: Optional[dict] = None
+        self.motor_voltage: Optional[dict] = None
         self.diag_task: Optional[asyncio.Task] = None
         self._link_was_live: Optional[bool] = None
-        self.tracking_log_ids = itertools.count(1)
+        self.tracking_log_ids = itertools.count(int(time.time() * 1000))  # rises across restarts, so a page polling with ?since= keeps receiving
         self.tracking_lock = asyncio.Lock()
         self.lock_reason: Optional[str] = None
         self.lock_exit_confirmed = True
@@ -316,9 +318,12 @@ class CameraState:
                 and FirmwareVersion.decode_word(version.gimbal) == (0, 4, 9))
 
     async def sync_firmware_link(self) -> None:
-        """Run the firmware link while firmware steering is selected on a supported camera."""
-        wanted = (self.is_connected and self.ip is not None
-                  and self.pointing.lock_control == "firmware" and self.firmware_tracking_supported())
+        """Run the firmware link on a supported camera, whichever steering mode is selected.
+
+        Its video arrives far sooner than RTSP's, which the app's own rate and angle locks
+        need as much as firmware steering does.
+        """
+        wanted = (self.is_connected and self.ip is not None and self.firmware_tracking_supported())
         link = self.firmware_link
         if wanted and link is not None and link.ip == self.ip:
             return
@@ -379,6 +384,18 @@ class CameraState:
                 await self.release_lock("Point lock stopped after an error")
             else:
                 self.lock_ms = round((time.perf_counter() - started) * 1000, 1)
+                if isinstance(lock, GimbalPointLock):
+                    # One record per frame, so a poor app lock can be diagnosed from the export.
+                    self.trace_tracking("app_lock", {
+                        "state": status.state.value, "control": lock.control,
+                        "px": [round(status.x), round(status.y)],
+                        "error_deg": [round(v, 2) for v in status.error_deg],
+                        "command": list(status.command),
+                        "target_rate": [round(v, 1) for v in status.target_rate_deg_s],
+                        "video_delay_ms": round(lock.loop.video_delay_s * 1000, 1),
+                        "frame_age_ms": round((time.monotonic() - frame.timestamp) * 1000, 1),
+                        "source": "link" if self.link_live() else "rtsp",
+                    })
                 if status.state is LockState.IDLE:
                     self.feedback.append({"event": "LOCK_LOST", "time": time.time()})
                 else:
@@ -590,8 +607,11 @@ class CameraState:
                 video_timeout=1.2 if link is not None else 0.4,
                 stop=self._firmware_emergency_stop, model=cfg.lock_model,
                 # No attitude-based delay correction: with an unreliable pitch sign (inverted
-                # bench mount) it drove the gimbal to its limit. Damp with the response instead.
-                response=min(cfg.lock_response, 1.0),
+                # bench mount) it drove the gimbal to its limit. The response scales the target
+                # offset instead: below 1 damps the firmware's steering, above 1 overdrives it.
+                response=cfg.lock_response,
+                # Every frame of the ~25 fps link; 20 Hz aliased to every other frame (12.5 Hz).
+                send_interval=0.03,
             )
             self.point_lock = lock
             self.lock_reason = None
@@ -605,6 +625,7 @@ class CameraState:
                 self.lock_exit_confirmed = lock.exit_confirmed
                 raise HTTPException(status_code=503, detail=self.lock_reason) from exc
             return self.lock_snapshot()
+        self.apply_mount_profile()
         loop = self.loop_model()
         # With attitude available the delay is compensated, so the gain follows the command delay.
         compensated = self.attitude_history.latest() is not None
@@ -619,12 +640,56 @@ class CameraState:
             attitude_signs=(cfg.yaw_sign, cfg.pitch_sign),
             control=cfg.lock_control if compensated else "rate",
             trust_video_delay=cfg.calibrated,
+            angle_pitch_offset=180.0 if self.mounted_inverted() else 0.0,
         )
         lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
         self.point_lock = lock
         self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
         return self.lock_snapshot()
+
+    def mounted_inverted(self) -> bool:
+        """Whether the gimbal hangs upside down, so it reports pitch 180 away from 0x0E's.
+
+        Read from the live attitude, which can't be mistaken: an upright mount reports
+        pitch within -90..25, an inverted one 90..180 or -180..-155. The camera's
+        mounting status (polled rarely) is the fallback while attitude is missing.
+        """
+        if time.monotonic() - self.attitude_time < 1.0:
+            pitch = (self.attitude["pitch"] + 180.0) % 360.0 - 180.0
+            return pitch > 57.5 or pitch < -122.5
+        return (self.camera_status or {}).get("mounting") == "INVERTED"
+
+    def mount(self) -> str:
+        return "inverted" if self.mounted_inverted() else "normal"
+
+    def command_pitch(self, reported: float) -> float:
+        """Convert a reported (possibly unwrapped) pitch to 0x0E terms, -180..180."""
+        offset = 180.0 if self.mounted_inverted() else 0.0
+        return (reported - offset + 180.0) % 360.0 - 180.0
+
+    def apply_mount_profile(self) -> None:
+        """Use the axis directions measured in the current mounting, or refuse to guess them."""
+        cfg = self.pointing
+        mount = self.mount()
+        profile = cfg.mount_profiles.get(mount)
+        if profile:
+            cfg.yaw_sign, cfg.pitch_sign = int(profile["yaw_sign"]), int(profile["pitch_sign"])
+            cfg.deg_per_unit_yaw = profile["deg_per_unit_yaw"]
+            cfg.deg_per_unit_pitch = profile["deg_per_unit_pitch"]
+        elif cfg.mount_profiles:
+            other = next(iter(cfg.mount_profiles))
+            raise HTTPException(status_code=409, detail=(
+                f"The loop was measured with the camera {'upside down' if other == 'inverted' else 'upright'}, "
+                f"but it is now {'upside down' if mount == 'inverted' else 'upright'}. Run the loop "
+                "measurement once in this orientation; both are remembered after that."))
+
+    def store_mount_profile(self) -> None:
+        cfg = self.pointing
+        cfg.mount_profiles[self.mount()] = {
+            "yaw_sign": cfg.yaw_sign, "pitch_sign": cfg.pitch_sign,
+            "deg_per_unit_yaw": cfg.deg_per_unit_yaw, "deg_per_unit_pitch": cfg.deg_per_unit_pitch,
+        }
 
     def gimbal_rate(self, window: float = 0.3) -> Optional[tuple[float, float]]:
         """Measured (yaw, pitch) turn rate in deg/s over the last ``window`` seconds."""
@@ -655,7 +720,7 @@ class CameraState:
         apart.
         """
         loop = asyncio.get_running_loop()
-        next_report = next_wifi = 0.0
+        next_report = next_wifi = next_volts = 0.0
         expected = loop.time() + 0.1
         while True:
             await asyncio.sleep(max(0.0, expected - loop.time()))
@@ -678,6 +743,25 @@ class CameraState:
                         info["changed"] = True
                     self.wifi = info
                     self.trace_tracking("wifi", info)
+            if now >= next_volts:
+                next_volts = now + 15
+                await self.sample_motor_voltage()
+
+    async def sample_motor_voltage(self) -> None:
+        """Read the gimbal motor voltages (one query), to show a supply that sags under load.
+
+        These are the motor drive voltages, not the supply input, but a weak supply shows up as
+        low or collapsing values, especially while the gimbal is moving. Best effort.
+        """
+        if not (self.client and self.is_connected):
+            return
+        try:
+            volts = await asyncio.wait_for(self.client.get_motor_voltage(), timeout=1.0)
+            record = {"yaw_v": volts.yaw, "pitch_v": volts.pitch, "roll_v": volts.roll}
+        except Exception as e:
+            record = {"error": f"{type(e).__name__}: {e}"}
+        self.motor_voltage = {"t": time.time(), **record}
+        self.trace_tracking("motor_voltage", record)
 
     def note_link_state(self) -> None:
         """Trace the moments the firmware link starts or stops delivering video."""
@@ -700,7 +784,7 @@ class CameraState:
             "time": time.time(), "monotonic": now, "server_started": SERVER_STARTED,
             "python": sys.version.split()[0], "platform": platform.platform(),
             "git": git_revision(), "camera_ip": self.ip, "connected": self.is_connected,
-            "firmware_version": vars(self.firmware_version) if self.firmware_version else None,
+            "firmware_version": dataclasses.asdict(self.firmware_version) if self.firmware_version else None,
             "lock_control": self.pointing.lock_control,
             "link": None if link is None else {
                 "ready": link.ready, "error": link.error, "frame_age_ms": age(link.last_frame_time),
@@ -714,6 +798,7 @@ class CameraState:
                             "p99": lag[int(len(lag) * 0.99) - 1] if lag else None,
                             "over_50ms": sum(1 for v in lag if v > 50)},
             "wifi": self.wifi,
+            "motor_voltage": self.motor_voltage,
             "trace": {"lifecycle_records": len(self.tracking_log),
                       "video_records": len(self.video_log),
                       "lifecycle_capacity": self.tracking_log.maxlen,
@@ -803,6 +888,7 @@ class CameraState:
         cfg.yaw_sign, cfg.pitch_sign = result.attitude_signs
         cfg.hfov_deg = round(result.hfov_deg, 1)
         cfg.calibrated = True
+        self.store_mount_profile()
         return {"config": vars(cfg), "notes": result.notes,
                 "fit_error_deg": round(result.yaw.fit_error_deg, 2)}
 
@@ -822,6 +908,7 @@ class CameraState:
         """Point the gimbal so the scene at `anchor` appears at `to`, optionally at a new zoom."""
         if not self.client or not self.is_connected:
             raise HTTPException(status_code=503, detail="Camera not connected")
+        self.apply_mount_profile()
         cfg = self.pointing
         same = req.gesture and self.gesture and self.gesture["id"] == req.gesture
         gesture = self.gesture if same else None
@@ -832,7 +919,8 @@ class CameraState:
                 raise HTTPException(status_code=503, detail="No gimbal attitude received yet")
             gesture = {
                 "id": req.gesture,
-                "yaw": pose[0] * cfg.yaw_sign, "pitch": pose[1] * cfg.pitch_sign,
+                # In 0x0E terms, which the target below is sent in.
+                "yaw": pose[0] * cfg.yaw_sign, "pitch": self.command_pitch(pose[1]) * cfg.pitch_sign,
                 "zoom": self.zoom or 1.0,
             }
             self.gesture = gesture if req.gesture else None
@@ -1009,6 +1097,9 @@ class EncodingRequest(BaseModel):
     # Simplified for UI
     resolution: Optional[str] = None
     bitrate_kbps: Optional[int] = None
+    # "main" is the live view; "recording" is the SD card stream, whose resolution
+    # also caps digital zoom for both (4K allows none).
+    stream: Literal["main", "recording"] = "main"
 
 class CommandRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
@@ -1051,6 +1142,7 @@ class PointingConfigRequest(BaseModel):
     command_delay_ms: float = Field(default=60.0, ge=0, le=1000)
     frame_delay_ms: float = Field(default=200.0, ge=0, le=2000)
     calibrated: bool = False
+    mount_profiles: dict[Literal["normal", "inverted"], dict[str, float]] = Field(default_factory=dict)
 
 class LockRequest(BaseModel):
     # Normalized offsets from the image centre: -0.5 = left/top edge, 0.5 = right/bottom.
@@ -1142,6 +1234,9 @@ async def set_pointing_config(req: PointingConfigRequest):
         if vars(state.pointing) != req.model_dump():
             await state._release_lock("Point lock released: steering settings changed")
         state.pointing = PointingConfig(**req.model_dump())
+        if state.mount() in state.pointing.mount_profiles:
+            # Directions typed into Settings apply to the orientation the camera is in now.
+            state.store_mount_profile()
     await state.sync_firmware_link()
     return vars(state.pointing)
 
@@ -1244,8 +1339,7 @@ async def zoom(direction: int): # -1, 0, 1
 async def get_encoding():
     if not state.is_connected or not state.client:
         raise HTTPException(status_code=503, detail="Camera not connected")
-    try:
-        params = await state.client.get_encoding_params(StreamType.MAIN)
+    def describe(params):
         return {
             "stream_type": params.stream_type.name,
             "enc_type": params.enc_type.name,
@@ -1253,6 +1347,15 @@ async def get_encoding():
             "bitrate_kbps": params.bitrate_kbps,
             "frame_rate": params.frame_rate
         }
+    try:
+        params = await state.client.get_encoding_params(StreamType.MAIN)
+        result = describe(params)
+        try:
+            result["recording"] = describe(await state.client.get_encoding_params(StreamType.RECORDING))
+        except Exception as e:
+            logger.debug(f"Recording encoding query failed: {e}")
+            result["recording"] = None
+        return result
     except Exception as e:
         logger.warning(f"Failed to get encoding params: {e}")
         raise HTTPException(status_code=503, detail="Failed to communicate with camera")
@@ -1263,8 +1366,9 @@ async def set_encoding(req: EncodingRequest):
         raise HTTPException(status_code=503, detail="Camera not connected")
     
     try:
+        stream = StreamType.RECORDING if req.stream == "recording" else StreamType.MAIN
         # Get current params to preserve other fields
-        curr = await state.client.get_encoding_params(StreamType.MAIN)
+        curr = await state.client.get_encoding_params(stream)
         
         target_w, target_h = curr.resolution_w, curr.resolution_h
         if req.resolution:
@@ -1288,8 +1392,12 @@ async def set_encoding(req: EncodingRequest):
         logger.info(f"Set encoding status: {success}")
         
         if success:
-            # Restart stream in background as it might take a moment
-            asyncio.create_task(state.restart_stream())
+            # Any encoding change resets zoom to 1x, and the recording resolution sets its range.
+            state.zoom_max = None
+            await state.refresh_zoom()
+            if stream == StreamType.MAIN:
+                # Restart stream in background as it might take a moment
+                asyncio.create_task(state.restart_stream())
             
         return {"status": "ok" if success else "failed"}
     except Exception as e:

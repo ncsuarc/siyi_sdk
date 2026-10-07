@@ -21,6 +21,12 @@ from siyi_sdk.tracking.gimbal import _ATTITUDE_STALE_S, LockState, LockStatus
 from siyi_sdk.tracking.point_lock import Image, PointLock, PointModel
 
 
+# Integrate the offset only within this fraction of the frame width of the centre, and
+# let the integral term shift the target by at most this fraction of the width.
+_INTEGRAL_ZONE = 0.05
+_INTEGRAL_LIMIT = 0.08
+
+
 class FirmwarePointLock:
     """Send observed scene coordinates; the gimbal does all steering and zoom compensation.
 
@@ -49,6 +55,7 @@ class FirmwarePointLock:
         video_delay_s: float = 0.2,
         hfov_deg: float = 81.0,
         response: float = 1.0,
+        integral: float = 1.5,
         owns_connection: bool = True,
         video_timeout: float = IO_TIMEOUT,
     ) -> None:
@@ -66,8 +73,14 @@ class FirmwarePointLock:
         the gimbal run away to a limit.
 
         ``response`` below 1 sends the point that fraction of the way from the
-        image centre, so the firmware steers more gently. It needs no measured
-        values, and the point still converges to the centre.
+        image centre, so the firmware steers more gently; above 1 it exaggerates
+        the offset (clamped to the frame), so it steers harder. It needs no
+        measured values, and the point still converges to the centre.
+
+        The firmware leaves a small standing offset and lags a point that keeps
+        drifting (the camera translating). ``integral`` (1/s) adds the offset's
+        running sum to the target, accumulated only near the centre so a large
+        initial error can't wind it up; 0 disables it.
         """
         self.client = client
         self._stop = stop
@@ -81,6 +94,8 @@ class FirmwarePointLock:
         self._hfov = hfov_deg
         self._zoom = 1.0
         self._response = response
+        self._ki = integral
+        self._integral = [0.0, 0.0]  # pixels x seconds, in the decoded image
         # False when a FirmwareLink keeps ``client`` connected: the lock then neither
         # connects nor closes it, and only switches AI mode.
         self._owns_connection = owns_connection
@@ -201,10 +216,19 @@ class FirmwarePointLock:
 
     async def _send(self, tracker: PointLock, width: int, height: int) -> None:
         x, y = self._predict(*tracker.center(), width, height)
-        x = width / 2 + (x - width / 2) * self._response
-        y = height / 2 + (y - height / 2) * self._response
+        now = time.monotonic()
+        dt = min(now - self._last_send, 0.2) if self._target_sent else 0.0
+        offsets = []
+        for axis, (value, size) in enumerate(((x, width), (y, height))):
+            error = value - size / 2
+            if self._ki and abs(error) < width * _INTEGRAL_ZONE:
+                self._integral[axis] += error * dt
+                limit = width * _INTEGRAL_LIMIT / self._ki
+                self._integral[axis] = max(-limit, min(limit, self._integral[axis]))
+            offsets.append(error * self._response + self._ki * self._integral[axis])
+        x, y = width / 2 + offsets[0], height / 2 + offsets[1]
         _, _, box_width, box_height = tracker.box()
-        self._last_send = time.monotonic()
+        self._last_send = now
         # Current decoded-image coordinates already include the user's zoom.
         target = (
             min(1279, max(0, round(x * 1280 / width))),

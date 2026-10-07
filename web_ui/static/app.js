@@ -307,6 +307,7 @@ class SiyiApp {
             document.getElementById(id).disabled = !connected;
         }
         document.getElementById('config-res-select').disabled = !connected;
+        document.getElementById('config-rec-res-select').disabled = !connected;
         document.getElementById('joystick-zone').setAttribute('aria-disabled', String(!connected));
         if (!connected) {
             this.stopMotion();
@@ -529,6 +530,7 @@ class SiyiApp {
     async saveConfig() {
         const ip = document.getElementById('config-ip-input').value.trim();
         const resValue = document.getElementById('config-res-select').value;
+        const recResValue = document.getElementById('config-rec-res-select').value;
         const button = document.getElementById('save-config-btn');
         const message = document.getElementById('config-status');
         button.disabled = true;
@@ -550,14 +552,17 @@ class SiyiApp {
 
             await this.savePointingConfig();
 
-            if (resValue && this.isCameraConnected && !ipChanged) {
+            for (const [stream, value] of [['recording', recResValue], ['main', resValue]]) {
+                if (!value || !this.isCameraConnected || ipChanged) continue;
                 const res = await this.request('/api/camera/encoding', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resolution: resValue})
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({resolution: value, stream})
                 });
                 if (res?.status !== 'ok') {
-                    throw new Error(res?.detail || "Failed to set encoding");
+                    throw new Error(res?.detail || `Failed to set ${stream === 'main' ? 'live view' : 'recording'} encoding`);
                 }
             }
+            if (recResValue || resValue) this.loadSystemInfo();
 
             message.innerText = ipChanged || !this.isCameraConnected
                 ? 'Camera IP saved. Waiting for the camera to respond. You can close Settings; connection retries continue automatically. Apply resolution changes after connecting.'
@@ -1203,6 +1208,8 @@ class SiyiApp {
             if (resEl) resEl.innerText = encData.resolution || "---";
             if (bitEl) bitEl.innerText = `${encData.bitrate_kbps} kbps`;
             if (fpsEl) fpsEl.innerText = encData.frame_rate || "---";
+            const recEl = document.getElementById('info-rec-resolution');
+            if (recEl) recEl.innerText = encData.recording?.resolution || "---";
         }
 
         // Fetch hardware and firmware info

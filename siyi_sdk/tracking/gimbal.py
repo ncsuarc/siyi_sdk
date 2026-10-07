@@ -131,6 +131,7 @@ class GimbalPointLock:
         min_score: float = 0.2,
         lost_timeout: float = 2.0,
         trust_video_delay: bool = False,
+        angle_pitch_offset: float = 0.0,
         send: SendRate | None = None,
         send_angle: SendAngle | None = None,
     ) -> None:
@@ -154,6 +155,9 @@ class GimbalPointLock:
                 (it was measured). Otherwise a shorter delay is used until the
                 online estimate confirms it, since overestimating it is unsafe.
                 Either way the estimate keeps adapting while locked.
+            angle_pitch_offset: Reported pitch minus the 0x0E pitch that produces it:
+                180 for an inverted mount (the A8 Mini then reports level as 180 but
+                takes level as 0), else 0.
             send: Coroutine taking (yaw, pitch) speeds; defaults to ``client.rotate_nowait``.
             send_angle: Coroutine taking (yaw, pitch) degrees in reported-attitude
                 terms; defaults to ``client.set_attitude_nowait``.
@@ -175,6 +179,7 @@ class GimbalPointLock:
         self.signs = attitude_signs
         self.control: ControlMode = control
         self.control_hz = control_hz
+        self.angle_pitch_offset = angle_pitch_offset
         self.controller = RateController(
             gains or LockGains.for_model(self.loop, compensated=attitude is not None), self.loop
         )
@@ -187,10 +192,12 @@ class GimbalPointLock:
         self._target: tuple[float, tuple[float, float], tuple[float, float]] | None = None
         # Recent (capture time, yaw, pitch) of the spot, for the velocity fit.
         self._observations: deque[tuple[float, float, float]] = deque()
-        self.velocity_window_s = 0.4
-        # A spot fixed on the ground moves across the sky no faster than this when
-        # the aircraft flies past; faster apparent motion is measurement error.
-        self.max_target_rate_deg_s = 30.0
+        # Short, so the estimate follows a change of motion within a few frames.
+        self.velocity_window_s = 0.25
+        # Attitude is relative to the mount, so turning the mount (by hand, or an
+        # aircraft yawing) moves the spot at the turn rate; well beyond this is
+        # measurement error.
+        self.max_target_rate_deg_s = 180.0
         # Online video-delay estimate: (arrival time, image error yaw, pitch) per frame.
         self.adapt_delay = True
         self._frames: deque[tuple[float, float, float]] = deque()
@@ -421,6 +428,9 @@ class GimbalPointLock:
         if self.control == "angle":
             assert self._send_angle is not None
             yaw, pitch = self._flip(*predicted)
+            # Attitude history is unwrapped and in reported terms; 0x0E wants -180..180
+            # in command terms.
+            pitch = (pitch - self.angle_pitch_offset + 180.0) % 360.0 - 180.0
             yaw = min(max(yaw, _YAW_LIMITS[0]), _YAW_LIMITS[1])
             pitch = min(max(pitch, _PITCH_LIMITS[0]), _PITCH_LIMITS[1])
             await self._send_angle(yaw, pitch)

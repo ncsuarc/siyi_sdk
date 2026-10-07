@@ -14,7 +14,7 @@ stabilized gimbal holds. A8 Mini digital zoom narrows the field of view as
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Moved to the SDK; re-exported for existing imports.
 from siyi_sdk.tracking.attitude import AttitudeHistory  # noqa: F401
@@ -46,6 +46,9 @@ class PointingConfig:
     command_delay_ms: float = 60.0
     frame_delay_ms: float = 200.0
     calibrated: bool = False
+    # Measured axis directions per mounting ("normal"/"inverted"): flipping the camera
+    # changes how image motion maps to reported attitude, so each needs its own.
+    mount_profiles: dict = field(default_factory=dict)
 
 
 def _ray(x: float, y: float, aspect: float, zoom: float, hfov_deg: float) -> tuple[float, float]:
