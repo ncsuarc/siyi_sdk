@@ -96,10 +96,11 @@ class AxisResult:
     """Measurements for one axis."""
 
     deg_per_unit_attitude: float  # signed, in reported-attitude terms
-    command_delay_s: float
+    command_delay_s: float  # dead time plus motor lag: where the steady turn extrapolates to 0
     video_delay_s: float
     image_scale: float  # picture rotation / attitude rotation (sign = attitude convention)
     fit_error_deg: float  # RMS mismatch of the delay fit
+    motor_tau_s: float = 0.0  # first-order lag of the motor getting up to speed
 
 
 @dataclass
@@ -144,6 +145,32 @@ def _onset_and_rate(
     slope, intercept = np.polyfit(t[steady], v[steady], 1)
     onset = -intercept / slope
     return float(onset), float(slope)
+
+
+def _motor_lag(
+    times: NDArray[Any], values: NDArray[Any], t_command: float, t_stop: float,
+    onset: float, slope: float,
+) -> float:
+    """Split the onset into dead time and a first-order motor lag; return the lag.
+
+    After dead time ``d`` a first-order motor with lag ``tau`` turns through
+    ``slope * (x - tau * (1 - exp(-x / tau)))`` at ``x = t - d``; its steady part
+    extrapolates to zero at ``d + tau``, which is ``onset``. So only ``tau`` is
+    free: pick the one that best fits the start of the turn.
+    """
+    baseline = float(np.median(values[times < t_command])) if np.any(times < t_command) else 0.0
+    use = (times > t_command) & (times <= t_stop)
+    t, v = times[use], values[use] - baseline
+    if len(t) < 5 or onset <= t_command:
+        return 0.0
+    best_tau, best_cost = 0.0, np.inf
+    for tau in np.arange(0.0, onset - t_command, 0.002):
+        x = np.maximum(t - (onset - tau), 0.0)
+        ramp = x - (tau * (1 - np.exp(-x / tau)) if tau > 0 else 0.0)
+        cost = float(np.mean((slope * ramp - v) ** 2))
+        if cost < best_cost:
+            best_tau, best_cost = float(tau), cost
+    return best_tau
 
 
 def _video_delay(
@@ -210,6 +237,7 @@ async def measure_axis(
     att_t = np.array([s[0] for s in samples])
     att_v = np.array([s[1 + index] for s in samples])
     onset, slope = _onset_and_rate(att_t, att_v, t_command, t_stop)
+    tau = _motor_lag(att_t, att_v, t_command, t_stop, onset, slope)
 
     frames = recorder.samples
     if len(frames) < 10:
@@ -221,7 +249,7 @@ async def measure_axis(
     # Turning right/up moves the picture left/down: image-aligned rotation is -dx / +dy.
     image_deg = _pixels_to_deg(-shift if index == 0 else shift, width, focal_hfov)
     lag, scale, rms = _video_delay(att_t, att_v, img_t, image_deg)
-    return AxisResult(slope / speed, max(0.0, onset - t_command), lag, scale, rms)
+    return AxisResult(slope / speed, max(0.0, onset - t_command), lag, scale, rms, tau)
 
 
 async def calibrate_loop(
@@ -284,6 +312,7 @@ async def calibrate_loop(
         ),
         command_delay_s=float(np.median([r.command_delay_s for r in results])),
         video_delay_s=float(np.median([r.video_delay_s for r in results])),
+        motor_tau_s=float(np.median([r.motor_tau_s for r in results])),
     )
     for r, name in ((yaw, "yaw"), (pitch_result, "pitch")):
         if r is not None and r.fit_error_deg > 0.5:

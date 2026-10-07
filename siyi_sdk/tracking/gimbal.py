@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -21,7 +22,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from siyi_sdk.tracking.attitude import AttitudeHistory
-from siyi_sdk.tracking.control import LockGains, LoopModel, RateController, pixel_error_deg
+from siyi_sdk.tracking.control import (
+    GimbalPredictor,
+    LockGains,
+    LoopModel,
+    RateController,
+    pixel_error_deg,
+)
+from siyi_sdk.tracking.estimator import TargetEstimator
+from siyi_sdk.tracking.metrics import LockMetrics
 from siyi_sdk.tracking.point_lock import PointLock, PointModel
 
 if TYPE_CHECKING:
@@ -36,6 +45,11 @@ _YAW_LIMITS = (-135.0, 135.0)
 _PITCH_LIMITS = (-90.0, 25.0)
 # Attitude older than this is treated as missing (stream stopped).
 _ATTITUDE_STALE_S = 0.3
+# A control step this long after the previous one means the event loop stalled.
+_STALL_S = 0.1
+# Never extrapolate the target's motion more than this beyond the lead the measured delays
+# call for (a frame that much later than expected is stale).
+_MAX_EXTRA_LEAD_S = 0.3
 
 
 class LockState(str, Enum):
@@ -132,6 +146,7 @@ class GimbalPointLock:
         lost_timeout: float = 2.0,
         trust_video_delay: bool = False,
         angle_pitch_offset: float = 0.0,
+        smith: bool | None = None,
         send: SendRate | None = None,
         send_angle: SendAngle | None = None,
     ) -> None:
@@ -158,6 +173,9 @@ class GimbalPointLock:
             angle_pitch_offset: Reported pitch minus the 0x0E pitch that produces it:
                 180 for an inverted mount (the A8 Mini then reports level as 180 but
                 takes level as 0), else 0.
+            smith: Steer against where the gimbal will be once the commands in flight
+                take effect (:class:`GimbalPredictor`), which allows a higher gain. By
+                default on for rate control with attitude and a measured motor lag.
             send: Coroutine taking (yaw, pitch) speeds; defaults to ``client.rotate_nowait``.
             send_angle: Coroutine taking (yaw, pitch) degrees in reported-attitude
                 terms; defaults to ``client.set_attitude_nowait``.
@@ -180,8 +198,15 @@ class GimbalPointLock:
         self.control: ControlMode = control
         self.control_hz = control_hz
         self.angle_pitch_offset = angle_pitch_offset
+        if smith is None:
+            smith = control == "rate" and attitude is not None and self.loop.motor_tau_s > 0
+        self.predictor = (
+            GimbalPredictor(self.loop.dead_time_s, self.loop.motor_tau_s) if smith else None
+        )
         self.controller = RateController(
-            gains or LockGains.for_model(self.loop, compensated=attitude is not None), self.loop
+            gains
+            or LockGains.for_model(self.loop, compensated=attitude is not None, smith=smith),
+            self.loop,
         )
         self.min_score = min_score
         self.lost_timeout = lost_timeout
@@ -190,14 +215,16 @@ class GimbalPointLock:
         self._lost_since: float | None = None
         # (capture time, target yaw/pitch in image-aligned degrees, velocity deg/s)
         self._target: tuple[float, tuple[float, float], tuple[float, float]] | None = None
-        # Recent (capture time, yaw, pitch) of the spot, for the velocity fit.
-        self._observations: deque[tuple[float, float, float]] = deque()
-        # Short, so the estimate follows a change of motion within a few frames.
-        self.velocity_window_s = 0.25
-        # Attitude is relative to the mount, so turning the mount (by hand, or an
-        # aircraft yawing) moves the spot at the turn rate; well beyond this is
-        # measurement error.
-        self.max_target_rate_deg_s = 180.0
+        # The spot's direction and angular velocity, filtered across frames
+        # (siyi_sdk.tracking.estimator). Attitude is relative to the mount, so turning
+        # the mount (by hand, or an aircraft yawing) moves the spot at the turn rate;
+        # far beyond 180 deg/s is measurement error.
+        self.estimator = TargetEstimator(max_rate_deg_s=180.0)
+        # Measurement noise: the tracker's pixel jitter, plus the error of the attitude
+        # interpolated at an estimated capture time.
+        self.tracker_noise_px = 1.0
+        self.attitude_noise_deg = 0.05
+        self._sigma_deg = 0.1
         # Online video-delay estimate: (arrival time, image error yaw, pitch) per frame.
         self.adapt_delay = True
         self._frames: deque[tuple[float, float, float]] = deque()
@@ -209,6 +236,13 @@ class GimbalPointLock:
         self._task: asyncio.Task[None] | None = None
         self._last_command: tuple[int, int] | None = None
         self.status = LockStatus(LockState.IDLE)
+        # Scores the current (or last) lock; see siyi_sdk.tracking.metrics.
+        self.metrics = LockMetrics()
+
+    @property
+    def tracker(self) -> PointLock | None:
+        """The fixed-scene tracker while locked, for drawing its debug view."""
+        return self._tracker
 
     @property
     def active(self) -> bool:
@@ -226,12 +260,15 @@ class GimbalPointLock:
         tracker.init(frame, (round(x - size / 2), round(y - size / 2), size, size))
         self._tracker = tracker
         self.controller.reset()
+        if self.predictor is not None:
+            self.predictor.reset()
         self._last_time = None
         self._lost_since = None
         self._target = None
-        self._observations.clear()
+        self.estimator.reset()
         self._frames.clear()
         self._last_command = None
+        self.metrics = LockMetrics()
         height, width = frame.shape[:2]
         self.status = LockStatus(
             LockState.LOCKED, x, y, width, height, 1.0, compensated=self.compensated
@@ -264,6 +301,10 @@ class GimbalPointLock:
         x, y = tracker.center()
         score = tracker.getTrackingScore()
         error = pixel_error_deg(x, y, width, height, hfov_deg=self.hfov_deg, zoom=zoom)
+        self._sigma_deg = math.hypot(
+            TargetEstimator.pixel_sigma_deg(self.tracker_noise_px, width, self.hfov_deg, zoom),
+            self.attitude_noise_deg,
+        )
         on_screen = 0 <= x < width and 0 <= y < height
 
         if score < self.min_score:
@@ -273,7 +314,7 @@ class GimbalPointLock:
                 return self.status
             self.controller.reset()
             self._target = None
-            self._observations.clear()
+            self.estimator.reset()
             await self._command((0, 0))
             self.status = LockStatus(
                 LockState.SEARCHING,
@@ -319,6 +360,7 @@ class GimbalPointLock:
         # No usable attitude: steer on the raw image error once per frame.
         command = self.controller.update(*error, dt)
         await self._command(command)
+        self.metrics.add(now, error, command)
         self.status = LockStatus(
             LockState.LOCKED, x, y, width, height, score, error, command, on_screen, False
         )
@@ -336,24 +378,12 @@ class GimbalPointLock:
         if pose is None:
             return False
         yaw, pitch = self._flip(*pose)
-        observations = self._observations
-        observations.append((captured, yaw + error[0], pitch + error[1]))
-        while observations and observations[0][0] < captured - self.velocity_window_s:
-            observations.popleft()
-        if len(observations) < 3:
-            self._target = (captured, observations[-1][1:], (0.0, 0.0))
-            return True
-        # A straight-line fit over the window gives the spot's angular velocity
-        # and a de-noised position. Frame-to-frame differences are far noisier,
-        # and the controller extrapolates this velocity across the video delay.
-        data = np.array(observations)
-        t = data[:, 0] - captured
-        limit = self.max_target_rate_deg_s
-        fitted = []
-        for axis in (1, 2):
-            slope, intercept = np.polyfit(t, data[:, axis], 1)
-            fitted.append((float(intercept), max(-limit, min(limit, float(slope)))))
-        self._target = (captured, (fitted[0][0], fitted[1][0]), (fitted[0][1], fitted[1][1]))
+        # The filter de-noises the position and estimates the velocity the controller
+        # extrapolates across the delays (frame-to-frame differences are far noisier).
+        position, velocity = self.estimator.update(
+            captured, (yaw + error[0], pitch + error[1]), self._sigma_deg
+        )
+        self._target = (captured, position, velocity)
         return True
 
     def _refine_video_delay(self) -> None:
@@ -419,11 +449,22 @@ class GimbalPointLock:
         # against the current attitude, and at steady speed the command delay
         # doesn't move the camera, so leading it would only add a bias.
         lead = now - captured
+        expected = self.loop.video_delay_s
         if self.control == "angle":
             lead += self.loop.command_delay_s
-        lead = min(lead, 1.0)  # don't extrapolate far
+            expected += self.loop.command_delay_s
+        elif self.predictor is not None:
+            # Compare where both will be once the commands in flight have acted.
+            lead += self.predictor.dead_time_s
+            expected += self.predictor.dead_time_s
+        # Further than this the frame is stale (video or the loop stalled), and a velocity
+        # carried that far would steer on a guess.
+        lead = min(lead, expected + _MAX_EXTRA_LEAD_S)
         predicted = (target[0] + velocity[0] * lead, target[1] + velocity[1] * lead)
         current = self._flip(latest[1], latest[2])
+        if self.control == "rate" and self.predictor is not None:
+            ahead = self.predictor.turn_ahead(now)
+            current = (current[0] + ahead[0], current[1] + ahead[1])
         error = (predicted[0] - current[0], predicted[1] - current[1])
         if self.control == "angle":
             assert self._send_angle is not None
@@ -436,8 +477,15 @@ class GimbalPointLock:
             await self._send_angle(yaw, pitch)
             command = (0, 0)
         else:
-            command = self.controller.update(*error, dt, feedforward=velocity)
+            # After a stall, steer on the fresh error but don't let the gap wind up the integral.
+            command = self.controller.update(
+                *error, dt, feedforward=velocity, integrate=dt <= _STALL_S
+            )
             await self._command(command)
+            if self.predictor is not None:
+                per_unit = self.loop.deg_per_unit
+                self.predictor.record(now, (command[0] * per_unit[0], command[1] * per_unit[1]))
+        self.metrics.add(now, error, command)
         s = self.status
         self.status = LockStatus(
             s.state,
@@ -469,7 +517,7 @@ class GimbalPointLock:
         was_active = self._tracker is not None
         self._tracker = None
         self._target = None
-        self._observations.clear()
+        self.estimator.reset()
         self._frames.clear()
         task, self._task = self._task, None
         if task is not None and task is not asyncio.current_task():

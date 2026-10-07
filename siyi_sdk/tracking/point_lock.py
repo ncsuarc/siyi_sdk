@@ -57,6 +57,11 @@ class PointLock:
         self.model = model
         self.score = 0.0
         self.inliers = 0
+        # Set ``debug`` to keep each frame's feature bookkeeping in ``debug_info`` (references
+        # to arrays the update computes anyway) for drawing how the lock is working.
+        self.debug = False
+        self.debug_info: dict[str, Any] | None = None
+        self._nearest: Image | None = None
 
     def init(self, frame: Image, roi: Box) -> None:
         """Lock onto the centre of ``roi`` (x, y, w, h); its size only sets the box."""
@@ -88,6 +93,7 @@ class PointLock:
         """Move the point by this frame's scene motion; returns (ok, box)."""
         gray = self._gray(frame)
         homography, keep, local = None, None, None
+        info = None
         if self.points is not None and len(self.points) >= 8:
             # OpenCV accepts None for the output points; its type stubs don't.
             moved, status, _ = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
@@ -106,9 +112,14 @@ class PointLock:
                 if homography is not None:
                     inlier = mask.ravel() == 1
                     keep = moved[good][inlier]
+                    self._nearest = None
                     if self.model == "local":
                         local = self._local_motion(self.points[good][inlier], keep)
+                    if self.debug:
+                        info = self._debug_record(moved, good, inlier)
         self.inliers = 0 if keep is None else len(keep)
+        if self.debug:
+            self.debug_info = info
         to_work = np.diag([self.scale, self.scale, 1.0])
         if self.inliers < self.MIN_INLIERS or (self.model == "local" and local is None):
             self.score = 0.0
@@ -132,8 +143,28 @@ class PointLock:
         nearest = np.argsort(distance)[: self.LOCAL_FEATURES]
         if len(nearest) < 6:
             return None
+        self._nearest = nearest
         affine, _ = cv2.estimateAffinePartial2D(before[nearest], after[nearest], method=cv2.LMEDS)
         return None if affine is None else np.vstack([affine, [0.0, 0.0, 1.0]])
+
+    def _debug_record(self, moved: Image, good: Image, inlier: Image) -> dict[str, Any]:
+        """Where each feature went and why it was kept or dropped, in work-size pixels.
+
+        ``kind``: 0 failed the forward-backward check, 1 rejected by RANSAC (moving object
+        or bad flow), 2 inlier, 3 inlier used to fit the point's local motion.
+        """
+        assert self.points is not None
+        kind = np.zeros(len(self.points), dtype=np.uint8)
+        good_index = np.flatnonzero(good)
+        kind[good_index[~inlier]] = 1
+        inlier_index = good_index[inlier]
+        kind[inlier_index] = 2
+        if self._nearest is not None:
+            kind[inlier_index[self._nearest]] = 3
+        return {
+            "before": self.points.reshape(-1, 2), "after": moved.reshape(-1, 2), "kind": kind,
+            "scale": self.scale,
+        }
 
     def center(self) -> tuple[float, float]:
         """Current point position in full-resolution pixels (may be off-screen)."""

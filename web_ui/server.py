@@ -56,7 +56,7 @@ from web_ui.frame_tap import TapTransport
 from web_ui.pointing import (
     AttitudeHistory, PointingConfig, center_for, clamp_attitude, screen_to_world,
 )
-from web_ui.lock_overlay import draw_firmware_command, draw_lock
+from web_ui.lock_overlay import draw_firmware_command, draw_lock, draw_tracking_debug
 from siyi_sdk.tracking import (
     CalibrationError, FirmwareLink, FirmwarePointLock, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
     calibrate_loop,
@@ -67,6 +67,11 @@ configure_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 # Global state
+# OpenCV starts one worker per core for every call. The tracker, preview encoder and video
+# decoder already run in their own threads, so a full pool each just competes for the CPU
+# and stalls the event loop that sends gimbal commands.
+cv2.setNumThreads(2)
+
 GLOBAL_CONFIG = {
     "camera_ip": "192.168.144.25",
     "port": 8082,
@@ -96,6 +101,70 @@ def wifi_info() -> Optional[dict]:
         if match and match.group(1) in keys and keys[match.group(1)] not in info:
             info[keys[match.group(1)]] = match.group(2)
     return info or None
+
+
+PREVIEW_INTERVAL_S = 1 / 15  # the browser preview's frame rate cap
+
+
+def raise_process_priority() -> None:
+    """Ask Windows to schedule this server ahead of normal desktop apps (best effort).
+
+    Point lock commands come from this process's event loop; when a busy machine
+    preempts it, the gimbal keeps turning at the last speed until the next command.
+    Above-normal (not high or realtime) leaves the desktop responsive.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        above_normal = 0x00008000
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), above_normal):
+            logger.warning("Could not raise the server's process priority")
+    except Exception as e:
+        logger.warning(f"Could not raise the server's process priority: {e}")
+
+
+def install_stall_tracer(record, threshold_s: float = 0.05) -> None:
+    """Report every event-loop callback that runs longer than ``threshold_s``, by name.
+
+    The loop-lag samples show that the loop froze; this shows what it was running. Wraps
+    ``asyncio.Handle._run`` (what asyncio's debug mode does, without debug mode's overhead).
+    A long callback means work on the loop; a long lag with no long callback means the
+    process as a whole was starved of CPU. At most 20 reports per second.
+    """
+    handle_run = asyncio.events.Handle._run
+    if getattr(handle_run, "stall_tracer", False):
+        return
+    budget = {"second": 0, "left": 20}
+
+    def describe(handle) -> str:
+        callback = getattr(handle, "_callback", None)
+        task = getattr(callback, "__self__", None)
+        if isinstance(task, asyncio.Task):
+            coro = task.get_coro()
+            return f"task {getattr(coro, '__qualname__', repr(coro))}"
+        return getattr(callback, "__qualname__", repr(callback))
+
+    def _run(self):
+        started = time.perf_counter()
+        try:
+            return handle_run(self)
+        finally:
+            elapsed = time.perf_counter() - started
+            if elapsed >= threshold_s:
+                second = int(time.monotonic())
+                if second != budget["second"]:
+                    budget["second"], budget["left"] = second, 20
+                if budget["left"] > 0:
+                    budget["left"] -= 1
+                    try:
+                        record({"ms": round(elapsed * 1000, 1), "what": describe(self)})
+                    except Exception:
+                        pass
+
+    _run.stall_tracer = True
+    asyncio.events.Handle._run = _run
 
 
 def git_revision() -> Optional[str]:
@@ -160,6 +229,8 @@ class CameraState:
         self.zoom_refresh_task: Optional[asyncio.Task] = None
         # Point lock steers the gimbal from the video; raw frames are kept to start a lock.
         self.point_lock: Optional[GimbalPointLock | FirmwarePointLock] = None
+        self.lock_serial = 0  # numbers app locks in the trace
+        self.summarized_lock: Optional[GimbalPointLock] = None
         # Firmware tracking channel (port 37256) frames and lock events, for the protocol export.
         self.tracking_log: deque = deque(maxlen=5000)
         # Per-packet video events arrive ~25 per second and would push lock and request events
@@ -173,6 +244,8 @@ class CameraState:
         self.tracking_log_ids = itertools.count(int(time.time() * 1000))  # rises across restarts, so a page polling with ?since= keeps receiving
         self.tracking_lock = asyncio.Lock()
         self.lock_reason: Optional[str] = None
+        # Optional video overlay of the tracker's features, switched from the dashboard.
+        self.lock_debug = False
         self.lock_exit_confirmed = True
         self.latest_image = None
         self.latest_image_time = 0.0
@@ -181,6 +254,8 @@ class CameraState:
         self.calibration_recorder = FrameMotionRecorder()
         self.calibrating = False
         self.preview_task: Optional[asyncio.Task] = None
+        self.preview_viewers = 0  # open /api/stream/video responses
+        self.last_preview_at = 0.0
         # In firmware steering mode: the camera's own low-latency 1280x720 stream on
         # port 37256, which replaces RTSP for the live view and the tracker.
         self.firmware_link: Optional[FirmwareLink] = None
@@ -209,6 +284,7 @@ class CameraState:
             self.status_task = asyncio.create_task(self.poll_status())
             self.motion_task = asyncio.create_task(self.motion_watchdog())
             if self.diag_task is None or self.diag_task.done():
+                install_stall_tracer(lambda fields: self.trace_tracking("slow_callback", fields))
                 self.diag_task = asyncio.create_task(self.diagnostics_monitor())
             self.media = MediaClient(ip)
             
@@ -373,10 +449,19 @@ class CameraState:
         image = frame.frame
         self.latest_image = image
         self.latest_image_time = frame.timestamp
+        self.last_frame_time = received  # video is live, whether or not anyone watches it
+        # The browser preview costs a copy, the overlay and a JPEG encode per frame, which
+        # competes with tracking for the CPU. Nobody sees more than 15 fps of it, and nobody
+        # sees it at all with no viewer connected.
+        want_preview = (self.preview_viewers > 0
+                        and received - self.last_preview_at >= PREVIEW_INTERVAL_S
+                        and (self.preview_task is None or self.preview_task.done()))
         self.calibration_recorder.add(image, frame.timestamp)
         lock = self.point_lock
         if lock is not None and lock.active:
             started = time.perf_counter()
+            if lock.tracker is not None:
+                lock.tracker.debug = self.lock_debug
             try:
                 status = await lock.update(image, zoom=self.zoom or 1.0, timestamp=frame.timestamp)
             except Exception as e:
@@ -387,6 +472,7 @@ class CameraState:
                 if isinstance(lock, GimbalPointLock):
                     # One record per frame, so a poor app lock can be diagnosed from the export.
                     self.trace_tracking("app_lock", {
+                        "lock": self.lock_serial,
                         "state": status.state.value, "control": lock.control,
                         "px": [round(status.x), round(status.y)],
                         "error_deg": [round(v, 2) for v in status.error_deg],
@@ -398,9 +484,15 @@ class CameraState:
                     })
                 if status.state is LockState.IDLE:
                     self.feedback.append({"event": "LOCK_LOST", "time": time.time()})
-                else:
+                    if isinstance(lock, GimbalPointLock):
+                        self.summarize_lock(lock, "tracking lost")
+                elif want_preview:
                     image = image.copy()  # keep the marker out of the frame the tracker reads
                     draw_lock(image, status)
+                    tracker = lock.tracker
+                    if self.lock_debug and tracker is not None:
+                        draw_tracking_debug(image, tracker.debug_info, tracker.score,
+                                            getattr(lock, "min_score", getattr(lock, "_min_score", 0.2)))
                     if isinstance(lock, FirmwarePointLock):
                         draw_firmware_command(
                             image, status, lock.last_target,
@@ -408,7 +500,8 @@ class CameraState:
                         )
         # The browser preview is encoded in the background so it never holds up
         # the next frame's tracking; if an encode is still running, skip this one.
-        if self.preview_task is None or self.preview_task.done():
+        if want_preview:
+            self.last_preview_at = received
             self.preview_task = asyncio.create_task(self._encode_preview(image, received))
 
     async def _encode_preview(self, image, received):
@@ -569,6 +662,7 @@ class CameraState:
             deg_per_unit=(cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch),
             command_delay_s=cfg.command_delay_ms / 1000,
             video_delay_s=cfg.frame_delay_ms / 1000,
+            motor_tau_s=cfg.motor_tau_ms / 1000,
         )
 
     async def start_lock(self, x: float, y: float) -> dict:
@@ -629,7 +723,10 @@ class CameraState:
         loop = self.loop_model()
         # With attitude available the delay is compensated, so the gain follows the command delay.
         compensated = self.attitude_history.latest() is not None
-        gains = LockGains.for_model(loop, compensated=compensated)
+        # Rate steering with a measured motor lag predicts the commands in flight
+        # (siyi_sdk.tracking.control.GimbalPredictor), which allows a higher gain.
+        smith = compensated and cfg.lock_control == "rate" and loop.motor_tau_s > 0
+        gains = LockGains.for_model(loop, compensated=compensated, smith=smith)
         gains.kp *= cfg.lock_response
         gains.ki *= cfg.lock_response ** 2
         gains.max_speed = cfg.lock_max_speed
@@ -641,8 +738,10 @@ class CameraState:
             control=cfg.lock_control if compensated else "rate",
             trust_video_delay=cfg.calibrated,
             angle_pitch_offset=180.0 if self.mounted_inverted() else 0.0,
+            smith=smith,
         )
         lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
+        self.lock_serial += 1
         self.point_lock = lock
         self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
@@ -824,8 +923,21 @@ class CameraState:
             self.lock_reason = reason
             if reason:
                 logger.info(reason)
+        if isinstance(lock, GimbalPointLock):
+            self.summarize_lock(lock, reason)
         if require_confirmed and not self.lock_exit_confirmed:
             raise HTTPException(status_code=503, detail=self.lock_reason or "Firmware exit is unconfirmed")
+
+    def summarize_lock(self, lock: "GimbalPointLock", reason: Optional[str]) -> None:
+        """Trace one app lock's score (siyi_sdk.tracking.metrics) once, however it ended."""
+        if self.summarized_lock is lock:
+            return
+        self.summarized_lock = lock
+        self.trace_tracking("lock_summary", {
+            "lock": self.lock_serial, "control": lock.control, "reason": reason,
+            "response": self.pointing.lock_response, "kp": round(lock.controller.gains.kp, 2),
+            "predictor": lock.predictor is not None, **lock.metrics.summary(),
+        })
 
     def lock_snapshot(self) -> dict:
         lock = self.point_lock
@@ -885,6 +997,7 @@ class CameraState:
         cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch = (round(v, 4) for v in model.deg_per_unit)
         cfg.command_delay_ms = round(model.command_delay_s * 1000, 1)
         cfg.frame_delay_ms = round(model.video_delay_s * 1000, 1)
+        cfg.motor_tau_ms = round(model.motor_tau_s * 1000, 1)
         cfg.yaw_sign, cfg.pitch_sign = result.attitude_signs
         cfg.hfov_deg = round(result.hfov_deg, 1)
         cfg.calibrated = True
@@ -1068,6 +1181,7 @@ state = CameraState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    raise_process_priority()
     # Load initial config or use default
     await state.initialize(GLOBAL_CONFIG["camera_ip"])
     yield
@@ -1141,8 +1255,12 @@ class PointingConfigRequest(BaseModel):
         return value
     command_delay_ms: float = Field(default=60.0, ge=0, le=1000)
     frame_delay_ms: float = Field(default=200.0, ge=0, le=2000)
+    motor_tau_ms: float = Field(default=0.0, ge=0, le=500)
     calibrated: bool = False
     mount_profiles: dict[Literal["normal", "inverted"], dict[str, float]] = Field(default_factory=dict)
+
+class LockDebugRequest(BaseModel):
+    enabled: bool
 
 class LockRequest(BaseModel):
     # Normalized offsets from the image centre: -0.5 = left/top edge, 0.5 = right/bottom.
@@ -1239,6 +1357,12 @@ async def set_pointing_config(req: PointingConfigRequest):
             state.store_mount_profile()
     await state.sync_firmware_link()
     return vars(state.pointing)
+
+@app.post("/api/track/debug")
+async def track_debug(req: LockDebugRequest):
+    """Show or hide the tracker's feature overlay on the video; the lock itself is untouched."""
+    state.lock_debug = req.enabled
+    return {"enabled": state.lock_debug}
 
 @app.post("/api/track/lock")
 async def track_lock(req: LockRequest):
@@ -1595,21 +1719,25 @@ async def websocket_attitude(websocket: WebSocket):
         pass
 
 async def mjpeg_generator(request: Request) -> AsyncGenerator[bytes, None]:
-    while not state.stop_event.is_set():
-        if await request.is_disconnected():
-            logger.debug("MJPEG client disconnected")
-            break
-        try:
-            # Wait for frame with timeout to prevent hanging on reboot
-            await asyncio.wait_for(state.frame_event.wait(), timeout=1.0)
-            state.frame_event.clear()
-            if state.latest_frame:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + state.latest_frame + b'\r\n')
-        except asyncio.TimeoutError:
-            # Just loop again and check stop_event and is_disconnected
-            continue
-        await asyncio.sleep(0.01)
+    state.preview_viewers += 1  # previews are only encoded while someone is watching
+    try:
+        while not state.stop_event.is_set():
+            if await request.is_disconnected():
+                logger.debug("MJPEG client disconnected")
+                break
+            try:
+                # Wait for frame with timeout to prevent hanging on reboot
+                await asyncio.wait_for(state.frame_event.wait(), timeout=1.0)
+                state.frame_event.clear()
+                if state.latest_frame:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + state.latest_frame + b'\r\n')
+            except asyncio.TimeoutError:
+                # Just loop again and check stop_event and is_disconnected
+                continue
+            await asyncio.sleep(0.01)
+    finally:
+        state.preview_viewers -= 1
 
 @app.get("/api/stream/video")
 async def video_stream(request: Request):

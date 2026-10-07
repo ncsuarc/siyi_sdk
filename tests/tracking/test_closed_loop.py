@@ -115,6 +115,8 @@ async def test_calibration_recovers_the_simulated_gimbal(ground):
     assert model.deg_per_unit == pytest.approx((0.8, 0.8), rel=0.05)
     assert model.video_delay_s == pytest.approx(0.25, abs=0.03)
     assert 0.05 < model.command_delay_s < 0.15  # 50 ms dead time + 60 ms motor lag
+    assert model.motor_tau_s == pytest.approx(0.06, abs=0.03)
+    assert model.dead_time_s == pytest.approx(0.05, abs=0.03)
     assert result.attitude_signs == (-1, -1)
     assert result.hfov_deg == pytest.approx(80.0, abs=2.5)  # corrected from a wrong 74
     assert not result.notes

@@ -123,6 +123,11 @@ class FirmwarePointLock:
         self.last_target_time = 0.0
 
     @property
+    def tracker(self) -> PointLock | None:
+        """The fixed-scene tracker while locked, for drawing its debug view."""
+        return self._tracker
+
+    @property
     def active(self) -> bool:
         """Whether a point is locked after confirmed AI-mode activation."""
         return self.status.state is LockState.LOCKED

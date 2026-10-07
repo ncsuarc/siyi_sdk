@@ -21,6 +21,7 @@ from typing import Any
 
 from siyi_sdk.tracking.attitude import AttitudeHistory
 from siyi_sdk.tracking.control import LockGains, LoopModel, RateController, pixel_error_deg
+from siyi_sdk.tracking.metrics import LockMetrics
 
 _LAZY = {
     "FirmwarePointLock": "siyi_sdk.tracking.firmware",
@@ -59,6 +60,7 @@ __all__ = [
     "FrameMotionRecorder",
     "GimbalPointLock",
     "LockGains",
+    "LockMetrics",
     "LockState",
     "LockStatus",
     "LoopCalibration",

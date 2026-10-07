@@ -383,6 +383,10 @@
                         <option value="global">Distant target near the horizon</option>
                     </select>
                 </div>
+                <div class="input-group">
+                    <label><input type="checkbox" id="lock-debug-toggle"> Show tracking debug on the video</label>
+                    <p class="control-hint">While a point is locked, draws every tracked feature: blue and green agree with the camera's motion, red are ignored as moving objects, and the bar is the score that releases the lock when it falls below the mark. Applies at once.</p>
+                </div>
                 <div class="calibration">
                     <button class="btn btn-block" id="calibrate-loop-btn" type="button"><i class="fas fa-stopwatch"></i> Measure loop timing</button>
                     <p id="calibration-status" class="control-hint" role="status" aria-live="polite">Not measured yet. Point the camera at a textured, still scene, then measure: the gimbal turns about 20° on each axis and back.</p>

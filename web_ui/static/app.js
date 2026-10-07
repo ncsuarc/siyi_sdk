@@ -840,6 +840,7 @@ class SiyiApp {
         clickAction.value = store.get('clickAction') === 'lock' ? 'lock' : 'aim';
         clickAction.addEventListener('change', () => store.set('clickAction', clickAction.value));
         document.getElementById('release-lock-btn').addEventListener('click', () => this.releaseLock());
+        this.initLockDebug();
         document.getElementById('calibrate-loop-btn').addEventListener('click', () => this.calibrateLoop());
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape' && this.lockState !== 'idle' &&
@@ -1069,10 +1070,29 @@ class SiyiApp {
         if (config.calibrated) {
             const rate = v => `${Math.abs(v).toFixed(2)}`;
             status.textContent = `Measured: ${rate(config.deg_per_unit_yaw)} / ${rate(config.deg_per_unit_pitch)} °/s per speed unit (yaw / pitch), ` +
-                `command delay ${Math.round(config.command_delay_ms)} ms, video delay ${Math.round(config.frame_delay_ms)} ms, ` +
+                `command delay ${Math.round(config.command_delay_ms)} ms` +
+                (config.motor_tau_ms ? ` (${Math.round(config.motor_tau_ms)} ms of it motor lag)` : '') +
+                `, video delay ${Math.round(config.frame_delay_ms)} ms, ` +
                 `field of view ${config.hfov_deg}°.`;
         }
         fields.model.value = config.lock_model ?? 'local';
+    }
+
+    /** The debug overlay is a display choice: it applies at once and never releases a lock. */
+    async setLockDebug(enabled) {
+        store.set('lockDebug', enabled ? '1' : '0');
+        try {
+            await this.request('/api/track/debug', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled})
+            });
+        } catch { /* the toggle is resent when the server is reachable again */ }
+    }
+
+    initLockDebug() {
+        const toggle = document.getElementById('lock-debug-toggle');
+        toggle.checked = store.get('lockDebug') === '1';
+        toggle.addEventListener('change', () => this.setLockDebug(toggle.checked));
+        if (toggle.checked) this.setLockDebug(true);
     }
 
     showLockControlOptions() {
@@ -1099,7 +1119,7 @@ class SiyiApp {
                     // A failed measurement can leave out-of-range values, and then the server
                     // rejects everything (lock steering included). Keep the choices, drop the measurement.
                     const {deg_per_unit_yaw, deg_per_unit_pitch, command_delay_ms, frame_delay_ms,
-                        calibrated, ...choices} = saved;
+                        motor_tau_ms, calibrated, ...choices} = saved;
                     config = await send(choices);
                     store.set('pointingConfig', JSON.stringify(config));
                     this.notify(`Saved loop timing was invalid (${e.message}) and was cleared; your other ` +
@@ -1158,7 +1178,10 @@ class SiyiApp {
         this.ws = new WebSocket(`${protocol}//${window.location.host}/ws/attitude`);
         this.ws.onopen = () => {
             // A restarted server is back on defaults; send this browser's saved settings again.
-            if (this.wsOpened) this.loadPointingConfig();
+            if (this.wsOpened) {
+                this.loadPointingConfig();
+                if (document.getElementById('lock-debug-toggle').checked) this.setLockDebug(true);
+            }
             this.wsOpened = true;
         };
 

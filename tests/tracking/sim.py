@@ -48,6 +48,30 @@ class SimConfig:
     drift_deg_s: tuple[float, float] = (0.0, 0.0)
     angle_bandwidth: float = 12.0  # 1/s, the gimbal's own position loop
     max_rate: float = 150.0
+    # Where a ground spot has moved across the sky by time t (image-aligned degrees);
+    # overrides drift_deg_s. Models sudden target motion and the rig being swung.
+    motion: Callable[[float], tuple[float, float]] | None = None
+    # Extra random delay of each frame's delivery (0..frame_jitter s); frames stay in
+    # order, so a late frame holds back the next ones, as the camera's bursts do.
+    frame_jitter: float = 0.0
+    # Freeze the whole event loop for stall_s every stall_every seconds (0 = never), as
+    # a CPU-starved server does. The gimbal keeps turning at the last speed meanwhile.
+    stall_every: float = 0.0
+    stall_s: float = 0.3
+    seed: int = 1
+
+
+def hardware_config(**overrides: object) -> SimConfig:
+    """Timing measured on the A8 Mini over the firmware video link (October 2026)."""
+    values: dict[str, object] = {
+        "deg_per_unit": 0.68,
+        "command_delay": 0.10,  # dead time; with motor_tau, 130 ms as calibration measures
+        "motor_tau": 0.03,
+        "video_delay": 0.04,
+        "fps": 25.0,
+    }
+    values.update(overrides)
+    return SimConfig(**values)  # type: ignore[arg-type]
 
 
 @dataclass
@@ -91,6 +115,8 @@ class SimGimbal:
 
     # -- world ------------------------------------------------------------------
     def drift(self, t: float) -> tuple[float, float]:
+        if self.cfg.motion is not None:
+            return self.cfg.motion(t)
         return self.cfg.drift_deg_s[0] * t, self.cfg.drift_deg_s[1] * t
 
     def render(self, t: float) -> np.ndarray:
@@ -142,26 +168,38 @@ class SimGimbal:
     async def _camera(self) -> None:
         queue: deque[tuple[float, float, np.ndarray]] = deque()
         next_frame = time.monotonic()
+        rng = np.random.default_rng(self.cfg.seed)
         while True:
             now = time.monotonic()
             if now >= next_frame:
-                queue.append(
-                    (now + self.cfg.video_delay, now - self.t0, self.render(now - self.t0))
-                )
+                due = now + self.cfg.video_delay + rng.uniform(0.0, self.cfg.frame_jitter)
+                if queue:
+                    due = max(due, queue[-1][0])
+                queue.append((due, now - self.t0, self.render(now - self.t0)))
                 next_frame += 1 / self.cfg.fps
             while queue and queue[0][0] <= now:
                 _, captured, image = queue.popleft()
-                frame = SimFrame(image, time.monotonic(), captured)
+                # Stamped as the firmware link's CaptureClock does: capture time plus the
+                # least-held frame's delay, so a frame held up by jitter or a stall still
+                # carries its true timing.
+                stamp = self.t0 + captured + self.cfg.video_delay
+                frame = SimFrame(image, stamp, captured)
                 for cb in self.frame_callbacks:
                     result = cb(frame)
                     if asyncio.iscoroutine(result):
                         await result
             await asyncio.sleep(0.003)
 
+    async def _stalls(self) -> None:
+        while self.cfg.stall_every > 0:
+            await asyncio.sleep(self.cfg.stall_every)
+            time.sleep(self.cfg.stall_s)  # blocks every task, like a starved process
+
     async def __aenter__(self) -> SimGimbal:
         self.t0 = time.monotonic()
         self._tasks = [
-            asyncio.create_task(c()) for c in (self._physics, self._attitude, self._camera)
+            asyncio.create_task(c())
+            for c in (self._physics, self._attitude, self._camera, self._stalls)
         ]
         await asyncio.sleep(0.3)  # fill the attitude history and video pipe
         return self

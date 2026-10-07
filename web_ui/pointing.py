@@ -45,6 +45,9 @@ class PointingConfig:
     deg_per_unit_pitch: float = 1.0
     command_delay_ms: float = 60.0
     frame_delay_ms: float = 200.0
+    # The part of the command delay that is the motor getting up to speed; 0 = not measured
+    # (then the rate lock can't predict the commands in flight and uses a lower gain).
+    motor_tau_ms: float = 0.0
     calibrated: bool = False
     # Measured axis directions per mounting ("normal"/"inverted"): flipping the camera
     # changes how image motion maps to reported attitude, so each needs its own.

@@ -62,6 +62,47 @@ def test_integral_only_near_target_and_bounded() -> None:
     assert controller.update(0, 0, 0.1) == (0, 0)
 
 
+def test_rounding_is_carried_so_the_average_speed_is_exact() -> None:
+    # 1.3 deg/s at 1 deg/s per unit: plain rounding would send 1 forever.
+    controller = RateController(LockGains(kp=0, ki=0), LoopModel())
+    sent = [controller.update(0, 0, 0.02, feedforward=(1.3, 1.25))[0] for _ in range(100)]
+    assert sum(sent) == pytest.approx(130, abs=1)
+    controller.reset()
+    pitch = [controller.update(0, 0, 0.02, feedforward=(0.0, 1.25))[1] for _ in range(100)]
+    assert sum(pitch) == pytest.approx(125, abs=1)
+    assert set(pitch) <= {1, 2}
+
+
+def test_saturated_commands_carry_no_remainder() -> None:
+    controller = RateController(LockGains(kp=4, ki=0, max_speed=60), LoopModel())
+    controller.update(500, 0, 0.02)
+    assert controller.update(0, 0, 0.02, feedforward=(2.0, 0.0)) == (2, 0)
+
+
+def test_acceleration_limit_ramps_the_command() -> None:
+    gains = LockGains(kp=10, ki=0, max_accel_deg_s2=500)
+    controller = RateController(gains, LoopModel())
+    first = controller.update(10, 0, 0.02)[0]  # wants 100 deg/s, may only reach 10
+    assert first == 10
+    assert controller.update(10, 0, 0.02)[0] == 20
+    assert RateController(LockGains(kp=10, ki=0), LoopModel()).update(10, 0, 0.02)[0] == 100
+
+
+def test_deadband_has_hysteresis() -> None:
+    controller = RateController(LockGains(kp=10, ki=0), LoopModel())
+    assert controller.update(0.2, 0, 0.02)[0] == 2  # outside: corrects
+    assert controller.update(0.05, 0, 0.02)[0] == 0  # inside: holds
+    assert controller.update(0.2, 0, 0.02)[0] == 0  # still held below the release
+    assert controller.update(0.3, 0, 0.02)[0] == 3  # released
+    # Held means nothing at all is sent, not even the integral or a noise-level feedforward.
+    controller.reset()
+    controller.update(0.2, 0, 0.5)  # builds some integral
+    assert controller.update(0.05, 0, 0.02, feedforward=(0.5, 0.0))[0] == 0
+    # A moving target is never held, however small the error.
+    controller.reset()
+    assert controller.update(0.05, 0, 0.02, feedforward=(5.0, 0.0))[0] == 6
+
+
 def test_attitude_history_interpolates_and_reports_latest() -> None:
     history = AttitudeHistory()
     assert history.at(1.0) is None and history.latest() is None

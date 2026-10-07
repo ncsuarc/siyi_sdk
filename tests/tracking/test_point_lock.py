@@ -108,3 +108,24 @@ def test_angle_control_needs_attitude() -> None:
 
     with pytest.raises(ValueError):
         GimbalPointLock(send=send, send_angle=send, control="angle")
+
+
+@pytest.mark.parametrize("model", ["local", "global"])
+def test_debug_info_sorts_features_and_costs_nothing_when_off(ground, model) -> None:
+    frame, _ = view(ground, 1000, 600)
+    moved, _ = view(ground, 1010, 604)
+    lock = PointLock(model)
+    lock.init(frame, (W // 2 - 20, H // 2 - 20, 40, 40))
+    lock.update(moved)
+    assert lock.debug_info is None  # off by default
+
+    lock = PointLock(model)
+    lock.debug = True
+    lock.init(frame, (W // 2 - 20, H // 2 - 20, 40, 40))
+    lock.update(moved)
+    info = lock.debug_info
+    assert info is not None and len(info["kind"]) == len(info["before"]) == len(info["after"])
+    kinds = set(info["kind"].tolist())
+    assert 2 in kinds or 3 in kinds
+    assert (3 in kinds) == (model == "local")
+    assert int((info["kind"] >= 2).sum()) == lock.inliers
