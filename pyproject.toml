@@ -97,7 +97,8 @@ dependencies = [
     "ruff>=0.5,<1",
     "black>=24.3,<26",
     "mypy>=1.10,<2",
-    "numpy>=1.21",
+    # NumPy 2.3+ drops Python 3.10; its stubs use syntax newer than our mypy target.
+    "numpy>=1.21,<2.3",
     "opencv-python>=4.5",
 ]
 
