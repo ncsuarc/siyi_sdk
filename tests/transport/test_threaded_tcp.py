@@ -186,3 +186,86 @@ async def test_connecting_twice_without_closing_is_an_error(peer: tuple[Peer, st
 
 async def _collect(transport: ThreadedTCPTransport) -> list[bytes]:
     return [chunk async for chunk in transport.stream()]
+
+
+async def test_full_buffer_backpressures_and_preserves_bytes(peer):
+    state, ip, port = peer
+    transport = ThreadedTCPTransport(
+        ip, port, read_size=1024, max_buffer_bytes=2048, max_buffer_chunks=2
+    )
+    await transport.connect()
+    await state.connected.wait()
+    payload = bytes(range(256)) * 64
+    state.writer.write(payload)
+    await state.writer.drain()
+    await asyncio.sleep(0.05)
+    buffer = transport._queue
+    assert buffer.nbytes <= 2048 and len(buffer.items) <= 2
+    assert buffer.peak_bytes <= 2048 and buffer.peak_chunks <= 2
+    received = bytearray()
+
+    async def drain():
+        async for data in transport.stream():
+            received.extend(data)
+            if len(received) == len(payload):
+                return
+
+    try:
+        await asyncio.wait_for(drain(), 2)
+        assert bytes(received) == payload
+    finally:
+        await transport.close()
+
+
+async def test_close_wakes_reader_waiting_for_full_buffer(peer):
+    state, ip, port = peer
+    transport = ThreadedTCPTransport(
+        ip, port, read_size=1024, max_buffer_bytes=1024, max_buffer_chunks=1
+    )
+    await transport.connect()
+    await state.connected.wait()
+    state.writer.write(b"x" * 8192)
+    await state.writer.drain()
+    await asyncio.sleep(0.05)
+    reader = transport._thread
+    await asyncio.wait_for(transport.close(), 1)
+    assert not reader.is_alive()
+
+
+async def test_eof_delivered_after_full_buffer_is_drained(peer):
+    state, ip, port = peer
+    transport = ThreadedTCPTransport(
+        ip, port, read_size=16, max_buffer_bytes=16, max_buffer_chunks=1
+    )
+    await transport.connect()
+    await state.connected.wait()
+    state.writer.write(b"x" * 64)
+    state.writer.close()
+    await asyncio.sleep(0.05)
+    try:
+        assert b"".join(await asyncio.wait_for(_collect(transport), 2)) == b"x" * 64
+    finally:
+        await transport.close()
+
+
+async def test_cancelled_connect_closes_socket_when_thread_finishes(monkeypatch):
+    entered, unblock, closed = threading.Event(), threading.Event(), threading.Event()
+
+    class Socket:
+        def close(self):
+            closed.set()
+
+    def opening():
+        entered.set()
+        unblock.wait(2)
+        return Socket()
+
+    transport = ThreadedTCPTransport()
+    monkeypatch.setattr(transport, "_open", opening)
+    task = asyncio.create_task(transport.connect())
+    await asyncio.to_thread(entered.wait, 1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    unblock.set()
+    assert await asyncio.to_thread(closed.wait, 1)
+    assert not transport.is_connected

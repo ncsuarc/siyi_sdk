@@ -195,17 +195,26 @@ class GimbalPredictor:
         # Run the motor model from well before start (so its speed then is settled),
         # integrating the turn only from start on.
         t = start - 5 * tau - step
-        speed = list(self._commanded(t))
-        turned = [0.0, 0.0]
+        commands = iter(self._sent)
+        upcoming = next(commands, None)
+        yaw, pitch = 0.0, 0.0
+        while upcoming is not None and upcoming[0] <= t - self.dead_time_s:
+            _, yaw, pitch = upcoming
+            upcoming = next(commands, None)
+        speed_yaw, speed_pitch = yaw, pitch
+        turned_yaw, turned_pitch = 0.0, 0.0
+        blend = 1.0 if tau <= 0 else min(1.0, step / tau)
         while t < end:
-            target = self._commanded(t)
-            blend = 1.0 if tau <= 0 else min(1.0, step / tau)
-            for axis in (0, 1):
-                speed[axis] += (target[axis] - speed[axis]) * blend
-                if t >= start:
-                    turned[axis] += speed[axis] * step
+            while upcoming is not None and upcoming[0] <= t - self.dead_time_s:
+                _, yaw, pitch = upcoming
+                upcoming = next(commands, None)
+            speed_yaw += (yaw - speed_yaw) * blend
+            speed_pitch += (pitch - speed_pitch) * blend
+            if t >= start:
+                turned_yaw += speed_yaw * step
+                turned_pitch += speed_pitch * step
             t += step
-        return turned[0], turned[1]
+        return turned_yaw, turned_pitch
 
 
 class TurnRateEstimator:

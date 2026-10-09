@@ -17,12 +17,14 @@ an exported log and the simulator. All angles are degrees.
 
 from __future__ import annotations
 
+import asyncio
 import math
+from array import array
 from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass
+@dataclass(slots=True)
 class _Event:
     start: float
     direction: tuple[float, float]  # unit vector of the error when the jump was seen
@@ -46,7 +48,8 @@ class LockMetrics:
         self._start: float | None = None
         self._last: float | None = None
         self._max_gap = 0.0
-        self._errors: list[float] = []
+        self._errors = array("d")
+        self._steady_squared = 0.0
         self._all_squared = 0.0
         self._samples = 0
         self._signs = [0, 0]
@@ -92,6 +95,11 @@ class LockMetrics:
                 event.settled_since = None
         else:
             self._errors.append(magnitude)
+            self._steady_squared += magnitude * magnitude
+
+    async def summary_async(self) -> dict[str, Any]:
+        """Summarize a stopped lock off the event loop; do not add samples concurrently."""
+        return await asyncio.to_thread(self.summary)
 
     def summary(self) -> dict[str, Any]:
         """Numbers for the log; None where there were no samples to judge."""
@@ -106,7 +114,7 @@ class LockMetrics:
         return {
             "duration_s": round(duration, 2),
             "rms_deg": (
-                round(math.sqrt(sum(e * e for e in errors) / len(errors)), 3) if errors else None
+                round(math.sqrt(self._steady_squared / len(errors)), 3) if errors else None
             ),
             "p95_deg": (
                 round(errors[min(len(errors) - 1, int(len(errors) * 0.95))], 3) if errors else None

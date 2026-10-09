@@ -67,11 +67,10 @@ class AttitudeHistory:
         """Linearly interpolated (yaw, pitch) at time t, clamped to the stored range."""
         if not self.samples:
             return None
-        times = [s[0] for s in self.samples]
-        i = bisect.bisect_left(times, t)
+        i = bisect.bisect_left(self.samples, t, key=lambda sample: sample[0])
         if i == 0:
             return self.samples[0][1:]
-        if i == len(times):
+        if i == len(self.samples):
             return self.samples[-1][1:]
         (t0, y0, p0), (t1, y1, p1) = self.samples[i - 1], self.samples[i]
         k = (t - t0) / (t1 - t0) if t1 > t0 else 1.0

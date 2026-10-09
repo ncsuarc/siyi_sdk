@@ -199,6 +199,8 @@ class GimbalPointLock:
             raise ValueError("pass a client or a send coroutine")
         if control == "angle" and (attitude is None or send_angle is None):
             raise ValueError("angle control needs an attitude history and a client or send_angle")
+        if not math.isfinite(control_hz) or control_hz <= 0:
+            raise ValueError("control_hz must be finite and positive")
         self._send = send
         self._send_angle = send_angle
         self.hfov_deg = hfov_deg
@@ -435,6 +437,48 @@ class GimbalPointLock:
         current = self.loop.video_delay_s
         candidates = np.clip(np.arange(current - 0.06, current + 0.0601, 0.005), 0.0, 1.0)
         best_delay, best_cost, worst_cost = current, np.inf, 0.0
+        candidates = candidates[arrival[0] - candidates >= samples[0, 0]]
+        if not len(candidates):
+            return
+        # Center time before fitting: the absolute monotonic clock can be large.
+        captured_all = arrival[None, :] - candidates[:, None]
+        centered = arrival - arrival.mean()
+        denominator = float(centered @ centered)
+        if denominator > np.finfo(float).eps * max(1.0, float(np.ptp(arrival)) ** 2):
+            costs = np.zeros(len(candidates))
+            for axis, sign in ((1, self.signs[0]), (2, self.signs[1])):
+                target = np.interp(captured_all, samples[:, 0], samples[:, axis]) * sign
+                target += frames[None, :, axis]
+                target -= target.mean(axis=1, keepdims=True)
+                slope = (target @ centered) / denominator
+                residual = target - slope[:, None] * centered
+                costs += np.mean(residual * residual, axis=1)
+            best = int(np.argmin(costs))
+            best_delay, best_cost, worst_cost = (
+                float(candidates[best]),
+                float(costs[best]),
+                float(np.max(costs)),
+            )
+        else:
+            best_delay, best_cost, worst_cost = self._degenerate_delay_fit(
+                candidates, arrival, samples, frames, current
+            )
+        # Without enough gimbal motion every delay fits equally well: keep the estimate.
+        if not np.isfinite(best_cost) or worst_cost < 4 * best_cost + 0.05:
+            return
+        self.loop.video_delay_s = 0.6 * current + 0.4 * best_delay
+        self._delay_confirmed = True
+
+    def _degenerate_delay_fit(
+        self,
+        candidates: NDArray[np.float64],
+        arrival: NDArray[np.float64],
+        samples: NDArray[np.float64],
+        frames: NDArray[np.float64],
+        current: float,
+    ) -> tuple[float, float, float]:
+        """Retain the original solver for degenerate time samples."""
+        best_delay, best_cost, worst_cost = current, math.inf, 0.0
         for delay in candidates:
             captured = arrival - delay
             if captured[0] < samples[0, 0]:
@@ -448,11 +492,7 @@ class GimbalPointLock:
             worst_cost = max(worst_cost, cost)
             if cost < best_cost:
                 best_delay, best_cost = float(delay), cost
-        # Without enough gimbal motion every delay fits equally well: keep the estimate.
-        if not np.isfinite(best_cost) or worst_cost < 4 * best_cost + 0.05:
-            return
-        self.loop.video_delay_s = 0.6 * current + 0.4 * best_delay
-        self._delay_confirmed = True
+        return best_delay, best_cost, worst_cost
 
     def _ensure_loop(self) -> None:
         if self._task is None or self._task.done():
@@ -461,11 +501,18 @@ class GimbalPointLock:
     async def _control_loop(self) -> None:
         period = 1.0 / self.control_hz
         last = time.monotonic()
+        deadline = last + period
         while self._tracker is not None:
-            await asyncio.sleep(period)
+            await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+            if not self.active:
+                return
             now = time.monotonic()
             dt, last = now - last, now
             await self._control_step(now, dt)
+            deadline += period
+            finished = time.monotonic()
+            if deadline <= finished:
+                deadline += (math.floor((finished - deadline) / period) + 1) * period
 
     async def _control_step(self, now: float, dt: float) -> None:
         """One fast step: predict the spot's direction now and steer toward it."""

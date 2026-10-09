@@ -416,7 +416,8 @@ class CameraState:
             await link.stop()
         if wanted:
             self.firmware_link = FirmwareLink(self.ip, on_frame=self._on_link_frame,
-                                              trace=self.trace_tracking)
+                                              trace=self.trace_tracking, image_format="bgr24",
+                                              on_failure=self._on_link_failure)
             self.firmware_link.start()
 
     def link_live(self) -> bool:
@@ -442,6 +443,9 @@ class CameraState:
     async def _on_link_frame(self, image, captured: float) -> None:
         await self._on_frame(SimpleNamespace(frame=image, timestamp=captured))
 
+    async def _on_link_failure(self, reason: str) -> None:
+        await self.release_lock(reason, require_confirmed=False)
+
     async def _on_rtsp_frame(self, frame):
         # While the firmware stream delivers, RTSP frames would mix two pictures with
         # different delays and sizes; use RTSP only until (or unless) it is ready.
@@ -462,7 +466,8 @@ class CameraState:
         want_preview = (self.preview_viewers > 0
                         and received - self.last_preview_at >= PREVIEW_INTERVAL_S
                         and (self.preview_task is None or self.preview_task.done()))
-        self.calibration_recorder.add(image, frame.timestamp)
+        if self.calibration_recorder.recording:
+            await self.calibration_recorder.add_async(image, frame.timestamp)
         lock = self.point_lock
         if lock is not None and lock.active:
             started = time.perf_counter()
@@ -494,7 +499,7 @@ class CameraState:
                 if status.state is LockState.IDLE:
                     self.feedback.append({"event": "LOCK_LOST", "time": time.time()})
                     if isinstance(lock, GimbalPointLock):
-                        self.summarize_lock(lock, "tracking lost")
+                        await self.summarize_lock(lock, "tracking lost")
                 elif want_preview:
                     image = image.copy()  # keep the marker out of the frame the tracker reads
                     draw_lock(image, status)
@@ -982,11 +987,11 @@ class CameraState:
             if reason:
                 logger.info(reason)
         if isinstance(lock, GimbalPointLock):
-            self.summarize_lock(lock, reason)
+            await self.summarize_lock(lock, reason)
         if require_confirmed and not self.lock_exit_confirmed:
             raise HTTPException(status_code=503, detail=self.lock_reason or "Firmware exit is unconfirmed")
 
-    def summarize_lock(self, lock: "GimbalPointLock", reason: Optional[str]) -> None:
+    async def summarize_lock(self, lock: "GimbalPointLock", reason: Optional[str]) -> None:
         """Trace one app lock's score (siyi_sdk.tracking.metrics) once, however it ended."""
         if self.summarized_lock is lock:
             return
@@ -994,7 +999,7 @@ class CameraState:
         self.trace_tracking("lock_summary", {
             "lock": self.lock_serial, "control": lock.control, "reason": reason,
             "response": self.pointing.lock_response, "kp": round(lock.controller.gains.kp, 2),
-            "predictor": lock.predictor is not None, **lock.metrics.summary(),
+            "predictor": lock.predictor is not None, **await lock.metrics.summary_async(),
         })
 
     def lock_snapshot(self) -> dict:

@@ -58,9 +58,9 @@ _HEALTHY_RESET_AFTER: Final[float] = 30.0
 _AUTO_PIPELINE = (
     "rtspsrc location={url} protocols={proto} latency={latency} buffer-mode=slave "
     "! decodebin "
+    "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
     "! videoconvert "
     "! video/x-raw,format=BGR "
-    "! queue max-size-buffers=1 leaky=downstream "
     "! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
 )
 

@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (point lock)
 
+- Firmware video now defaults to full-resolution grayscale for tracking. Pass
+  `FirmwareLink(..., image_format="bgr24")` for the previous color array contract.
+  The ground dashboard explicitly retains BGR; RTSP frames remain BGR.
+- Control scheduling skips missed deadlines instead of adding work time to each
+  period. Firmware video uses bounded compressed storage and newest-picture delivery;
+  overload releases the tracking owner through `on_failure` and reconnects without
+  resuming a lock. See `docs/tracking.md` for limits and callback migration.
+- Prediction and delay fitting avoid repeated work; exact lock metrics use compact
+  storage. Async calibration recording and final summaries avoid synchronous work
+  in control callbacks. Local measurements and remaining Pi validation are recorded
+  in `docs/performance-results.md`.
 - `LockGains` are in physical units (deg/s per degree) and derived from a
   measured `LoopModel` with `LockGains.for_model`; `max_step` is gone.
 - The dashboard requests the attitude stream at 50 Hz and encodes the browser

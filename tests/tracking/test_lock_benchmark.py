@@ -139,3 +139,30 @@ async def test_predictor_tolerates_a_wrong_model(ground, model_error):
     print(f"\njump with model delays x{model_error}: {score}")
     assert score["unsettled_events"] == 0
     assert score["rms_all_deg"] < 3.0
+
+
+@pytest.mark.parametrize("name", ["jump", "drift"])
+async def test_grayscale_closed_loop_quality(ground, name, monkeypatch):
+    av = pytest.importorskip("av")
+    original_lock = GimbalPointLock.lock
+    original_update = GimbalPointLock.update
+
+    def gray(frame):
+        return (
+            av.VideoFrame.from_ndarray(frame, format="bgr24")
+            .reformat(format="yuv420p")
+            .to_ndarray(format="gray")
+        )
+
+    def lock(self, frame, *args, **kwargs):
+        return original_lock(self, gray(frame), *args, **kwargs)
+
+    async def update(self, frame, *args, **kwargs):
+        return await original_update(self, gray(frame), *args, **kwargs)
+
+    monkeypatch.setattr(GimbalPointLock, "lock", lock)
+    monkeypatch.setattr(GimbalPointLock, "update", update)
+    score = await run_profile(ground, name)
+    assert score["rms_deg"] is not None and score["rms_deg"] < 1.0
+    if name == "jump":
+        assert score["events"] >= 1 and score["unsettled_events"] == 0

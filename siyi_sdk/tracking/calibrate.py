@@ -60,6 +60,22 @@ class FrameMotionRecorder:
         self._previous: NDArray[Any] | None = None
         self._window: NDArray[Any] | None = None
         self._scale = 1.0
+        self._jobs = asyncio.Lock()
+
+    async def add_async(self, image: NDArray[Any], timestamp: float) -> None:
+        """Record serially off the event loop; cancellation drains native work."""
+        async with self._jobs:
+            job = asyncio.create_task(asyncio.to_thread(self.add, image, timestamp))
+            try:
+                await asyncio.shield(job)
+            except asyncio.CancelledError:
+                await job
+                raise
+
+    async def stop_async(self) -> None:
+        """Drain recording before snapshots or another recording can begin."""
+        async with self._jobs:
+            self.stop()
 
     def start(self) -> None:
         """Begin a new recording."""
@@ -77,7 +93,7 @@ class FrameMotionRecorder:
             return
         self.width = image.shape[1]
         self._scale = min(1.0, self.WORK_WIDTH / image.shape[1])
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         size = (round(gray.shape[1] * self._scale), round(gray.shape[0] * self._scale))
         small = cv2.resize(gray, size, interpolation=cv2.INTER_AREA).astype(np.float32)
         if self._window is None or self._window.shape != small.shape:
@@ -182,11 +198,24 @@ def _video_delay(
 ) -> tuple[float, float, float]:
     """Find lag L and scale k with img(t) ~ k * att(t - L) + b; return (L, k, rms)."""
     best = (0.0, 1.0, math.inf)
-    for lag in np.arange(0.0, 0.8, 0.005):
-        att = np.interp(img_t - lag, att_t, att_v)
-        a = np.vstack([att, np.ones_like(att)]).T
-        (k, b), *_ = np.linalg.lstsq(a, img_v, rcond=None)
-        rms = float(np.sqrt(np.mean((a @ np.array([k, b]) - img_v) ** 2)))
+    lags = np.arange(0.0, 0.8, 0.005)
+    values = np.interp(img_t[None, :] - lags[:, None], att_t, att_v)
+    means = values.mean(axis=1, keepdims=True)
+    centered = values - means
+    denominator = np.sum(centered * centered, axis=1)
+    image_mean = img_v.mean()
+    numerator = centered @ (img_v - image_mean)
+    threshold = np.finfo(float).eps * np.maximum(1.0, np.sum(values * values, axis=1))
+    regular = denominator > threshold
+    slopes = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=regular)
+    residual = centered * slopes[:, None] + image_mean - img_v
+    costs = np.sqrt(np.mean(residual * residual, axis=1))
+    for index, lag in enumerate(lags):
+        k, rms = float(slopes[index]), float(costs[index])
+        if not regular[index]:
+            a = np.vstack([values[index], np.ones_like(img_v)]).T
+            (k, b), *_ = np.linalg.lstsq(a, img_v, rcond=None)
+            rms = float(np.sqrt(np.mean((a @ np.array([k, b]) - img_v) ** 2)))
         if rms < best[2]:
             best = (float(lag), float(k), rms)
     return best
@@ -232,7 +261,7 @@ async def measure_axis(
         await _turn(send, -command[0], -command[1], move_s)  # come back
         await asyncio.sleep(settle_s)
     finally:
-        recorder.stop()
+        await recorder.stop_async()
         attitude.seconds = kept
 
     samples = [s for s in attitude.samples if s[0] >= t_command - 0.3]
@@ -240,8 +269,8 @@ async def measure_axis(
         raise CalibrationError("no attitude stream; request it at 50 Hz or more first")
     att_t = np.array([s[0] for s in samples])
     att_v = np.array([s[1 + index] for s in samples])
-    onset, slope = _onset_and_rate(att_t, att_v, t_command, t_stop)
-    tau = _motor_lag(att_t, att_v, t_command, t_stop, onset, slope)
+    onset, slope = await asyncio.to_thread(_onset_and_rate, att_t, att_v, t_command, t_stop)
+    tau = await asyncio.to_thread(_motor_lag, att_t, att_v, t_command, t_stop, onset, slope)
 
     frames = recorder.samples
     if len(frames) < 10:
@@ -252,7 +281,7 @@ async def measure_axis(
     focal_hfov = math.degrees(2 * math.atan(math.tan(math.radians(hfov_deg) / 2) / zoom))
     # Turning right/up moves the picture left/down: image-aligned rotation is -dx / +dy.
     image_deg = _pixels_to_deg(-shift if index == 0 else shift, width, focal_hfov)
-    lag, scale, rms = _video_delay(att_t, att_v, img_t, image_deg)
+    lag, scale, rms = await asyncio.to_thread(_video_delay, att_t, att_v, img_t, image_deg)
     return AxisResult(slope / speed, max(0.0, onset - t_command), lag, scale, rms, tau)
 
 

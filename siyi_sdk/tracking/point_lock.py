@@ -49,6 +49,7 @@ class PointLock:
     MIN_INLIERS = 25
     TARGET_FEATURES = 300
     LOCAL_FEATURES = 40
+    PYRAMID_LEVEL = 3
 
     def __init__(self, model: PointModel = "local") -> None:
         """Create an unlocked tracker using motion ``model`` (``local`` or ``global``)."""
@@ -77,7 +78,7 @@ class PointLock:
         self.inliers = 0
 
     def _gray(self, frame: Image) -> Image:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if self.scale == 1.0:
             return gray
         size = (round(gray.shape[1] * self.scale), round(gray.shape[0] * self.scale))
@@ -97,14 +98,23 @@ class PointLock:
         if self.points is not None and len(self.points) >= 8:
             # OpenCV accepts None for the output points; its type stubs don't.
             moved, status, _ = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
-                self.gray, gray, self.points, None, winSize=(21, 21), maxLevel=3
+                self.gray, gray, self.points, None, winSize=(21, 21), maxLevel=self.PYRAMID_LEVEL
             )
-            back, status_back, _ = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
-                gray, self.gray, moved, None, winSize=(21, 21), maxLevel=3
-            )
-            # Forward-backward check drops features that slid along edges or got occluded.
-            error = np.linalg.norm(self.points - back, axis=2).ravel()
-            good = (status.ravel() == 1) & (status_back.ravel() == 1) & (error < 1.0)
+            good = status.ravel() == 1
+            if good.sum() >= 8:
+                indices = np.flatnonzero(good)
+                back, status_back, _ = cv2.calcOpticalFlowPyrLK(  # type: ignore[call-overload]
+                    gray,
+                    self.gray,
+                    moved[good],
+                    None,
+                    winSize=(21, 21),
+                    maxLevel=self.PYRAMID_LEVEL,
+                )
+                error = np.linalg.norm(self.points[good] - back, axis=2).ravel()
+                good[indices] = (status_back.ravel() == 1) & (error < 1.0)
+            else:
+                good[:] = False
             if good.sum() >= 8:
                 homography, mask = cv2.findHomography(
                     self.points[good], moved[good], cv2.RANSAC, 3.0
@@ -120,13 +130,15 @@ class PointLock:
         self.inliers = 0 if keep is None else len(keep)
         if self.debug:
             self.debug_info = info
-        to_work = np.diag([self.scale, self.scale, 1.0])
         if self.inliers < self.MIN_INLIERS or (self.model == "local" and local is None):
             self.score = 0.0
         else:
             self.score = self.inliers / max(1, 0 if self.points is None else len(self.points))
             motion = local if self.model == "local" else homography
-            full = np.linalg.inv(to_work) @ motion @ to_work
+            assert motion is not None
+            full = motion.copy()
+            full[:2, 2] /= self.scale
+            full[2, :2] *= self.scale
             self.shape = cv2.perspectiveTransform(self.shape, full)
         self.gray = gray
         # Keep agreeing features; re-detect across the frame when too few remain.

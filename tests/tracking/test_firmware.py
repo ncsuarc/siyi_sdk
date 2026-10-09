@@ -147,10 +147,20 @@ async def test_firmware_target_writes_are_rate_limited(monkeypatch):
 
 
 async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
+    from types import SimpleNamespace
+
     from fastapi import HTTPException
 
     from web_ui import server
 
+    # This lifecycle test injects its command client; never start a real video connection.
+    monkeypatch.setattr(
+        server,
+        "FirmwareLink",
+        lambda ip, **kwargs: SimpleNamespace(
+            ip=ip, ready=False, client=None, start=lambda: None, stop=AsyncMock()
+        ),
+    )
     frame = np.random.default_rng(9).integers(0, 256, (180, 320, 3), dtype=np.uint8)
     for outcome in (
         "release",

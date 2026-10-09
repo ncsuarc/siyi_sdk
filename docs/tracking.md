@@ -94,3 +94,29 @@ The simulation is a model, not the A8 Mini. How the real gimbal responds to a 50
 - Accuracy is best while the spot stays near the image centre, which the loop maintains. If the spot stays out of view for many seconds, the estimate drifts.
 - The A8 Mini reports yaw relative to the aircraft body. A steady aircraft turn looks like the spot moving and is followed; a sudden yaw shows up as a short pointing error.
 - Point lock does not follow moving objects; use an object tracker such as `cv2.TrackerNano` for those, and do not rely on its score alone to detect loss.
+
+## Performance and image-format compatibility
+
+`FirmwareLink` now delivers full-resolution, single-channel `uint8` grayscale images by default. `PointLock`, `GimbalPointLock`, `FirmwarePointLock`, and calibration recording accept both grayscale and BGR images. Image coordinates and ROI sizes still refer to the original resolution. Consumers requiring color or an `(H, W, 3)` array must pass `image_format="bgr24"`; the ground dashboard does this explicitly. RTSP `StreamFrame` remains BGR.
+
+The firmware link decodes compressed packets in order, but a slow frame callback receives only the newest pending decoded picture. Each picture carries the timestamp associated with its decoded packet, including when the decoder delays output. An overload invalidates pending pictures and fails the session. Supply an asynchronous `on_failure(reason)` callback that releases your tracking owner; automatic reconnection switches AI mode off and must not restart a lock.
+
+Provisional limits are configurable constructor keywords:
+
+| Component | Option | Default |
+| --- | --- | --- |
+| `ThreadedTCPTransport` | `max_buffer_bytes`, `max_buffer_chunks` | 4 MiB, 256 chunks |
+| `FirmwareLink` | `max_packet_bytes`, `max_packets` | 8 MiB, 256 access units, including active decode batches |
+| `FirmwareLink` | `max_queue_age` | 0.4 seconds from local receipt |
+| `FirmwareLink` | `batch_packets`, `batch_bytes` | 8 access units, 1 MiB; one indivisible access unit may exceed a custom smaller batch-byte limit |
+| `FirmwareLink` | `decoder_threads` | 0 (codec-selected count), with slice threading |
+
+Raw TCP limits apply backpressure and preserve all bytes. Compressed limits fail the session instead of dropping dependent encoded frames. These limits exclude OS socket buffers, the receive staging buffer, native decoder allocations, and decoded pictures. The decoded handoff retains one pending picture plus the picture in use by the callback; active decode/conversion can temporarily retain another picture. Local receipt age is not camera exposure age.
+
+Stopping waits up to one second for in-flight native decoding. If the job remains alive, the link stays failed and refuses `start()` until that job finishes; cancellation does not forcibly terminate native code. A caller must not repeatedly replace a failed link with new instances to bypass this ownership guard.
+
+For asynchronous calibration callbacks, use `await recorder.add_async(image, timestamp)`. It serializes native work and drains it on cancellation. Use `await recorder.stop_async()` before accessing the completed recording or calling `start()` again. The existing synchronous `add`/`stop` methods remain available; do not mix synchronous writes with asynchronous recording jobs.
+
+`await lock.metrics.summary_async()` moves final summary work off the callback; call it after stopping the lock. Exact whole-lock p95 and event medians are preserved. Numeric storage is more compact, but exact lifetime statistics and temporary sorting memory still grow with lock duration. Python worker threads can still contend for the GIL.
+
+See [performance results](performance-results.md) for reproducible local measurements, rejected candidates, and remaining Pi validation.

@@ -16,6 +16,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Final, TypeAlias
@@ -36,6 +37,76 @@ _POLL: Final = 0.25
 _Item: TypeAlias = "tuple[bytes, float] | BaseException | None"
 # The class has a ``socket`` property, which would shadow the module in its own annotations.
 _Socket: TypeAlias = socket.socket
+
+
+class _ReceiveBuffer:
+    """Bound data before posting one notification; terminal state uses no data capacity."""
+
+    def __init__(self, max_bytes: int, max_chunks: int) -> None:
+        self.condition = threading.Condition()
+        self.loop = asyncio.get_running_loop()
+        self.event = asyncio.Event()
+        self.items: deque[tuple[bytes, float]] = deque()
+        self.max_bytes, self.max_chunks = max_bytes, max_chunks
+        self.nbytes = self.peak_bytes = self.peak_chunks = 0
+        self.scheduled = self.ended = False
+        self.error: BaseException | None = None
+
+    def capacity(self, read_size: int) -> int:
+        with self.condition:
+            self.condition.wait_for(
+                lambda: (
+                    self.ended
+                    or (self.nbytes < self.max_bytes and len(self.items) < self.max_chunks)
+                )
+            )
+            return 0 if self.ended else min(read_size, self.max_bytes - self.nbytes)
+
+    def _notify(self) -> None:
+        with self.condition:
+            self.scheduled = False
+        self.event.set()
+
+    def _schedule(self) -> None:
+        if not self.scheduled:
+            self.scheduled = True
+            try:
+                self.loop.call_soon_threadsafe(self._notify)
+            except RuntimeError:
+                self.scheduled = False
+
+    def put(self, data: bytes, arrival: float) -> None:
+        with self.condition:
+            if self.ended:
+                return
+            self.items.append((data, arrival))
+            self.nbytes += len(data)
+            self.peak_bytes = max(self.peak_bytes, self.nbytes)
+            self.peak_chunks = max(self.peak_chunks, len(self.items))
+            self._schedule()
+
+    def finish(self, error: BaseException | None = None, *, discard: bool = False) -> None:
+        with self.condition:
+            self.ended = True
+            self.error = error
+            if discard:
+                self.items.clear()
+                self.nbytes = 0
+            self.condition.notify_all()
+            self._schedule()
+
+    async def get(self) -> _Item:
+        while True:
+            with self.condition:
+                if self.items:
+                    item = self.items.popleft()
+                    self.nbytes -= len(item[0])
+                    self.condition.notify()
+                    return item
+                if self.ended:
+                    return self.error
+                self.event.clear()
+            await self.event.wait()
 
 
 def _close_late(opening: asyncio.Future[_Socket]) -> None:
@@ -65,6 +136,8 @@ class ThreadedTCPTransport(AbstractTransport):
         *,
         connect_timeout: float = 5.0,
         read_size: int = READ_SIZE,
+        max_buffer_bytes: int = 4 << 20,
+        max_buffer_chunks: int = 256,
     ) -> None:
         """Initialize the transport.
 
@@ -73,16 +146,22 @@ class ThreadedTCPTransport(AbstractTransport):
             port: Target TCP port.
             connect_timeout: Seconds to wait for the TCP handshake.
             read_size: Largest read, in bytes, taken from the socket at once.
+            max_buffer_bytes: Maximum queued raw bytes, excluding the read staging buffer.
+            max_buffer_chunks: Maximum queued chunks; notifications are coalesced.
         """
+        if min(read_size, max_buffer_bytes, max_buffer_chunks) <= 0:
+            raise ValueError("Read size and receive buffer limits must be positive")
         self._ip: str = ip
         self._port: int = port
         self._connect_timeout: float = connect_timeout
         self._read_size: int = read_size
+        self._max_buffer_bytes = max_buffer_bytes
+        self._max_buffer_chunks = max_buffer_chunks
         self._connected: bool = False
         self._sock: _Socket | None = None
         self._thread: threading.Thread | None = None
         self._sender: ThreadPoolExecutor | None = None
-        self._queue: asyncio.Queue[_Item] | None = None
+        self._queue: _ReceiveBuffer | None = None
         self._closing: threading.Event = threading.Event()
 
     async def connect(self) -> None:
@@ -96,7 +175,7 @@ class ThreadedTCPTransport(AbstractTransport):
         loop = asyncio.get_running_loop()
         opening = loop.run_in_executor(None, self._open)
         try:
-            sock = await opening
+            sock = await asyncio.shield(opening)
         except asyncio.CancelledError:
             # A connect timeout cancels us mid-handshake; don't leak the socket if it arrives.
             opening.add_done_callback(_close_late)
@@ -107,12 +186,12 @@ class ThreadedTCPTransport(AbstractTransport):
             raise ConnError(f"Failed to connect to {self._ip}:{self._port}: {e}") from e
         self._sock = sock
         self._closing = threading.Event()
-        self._queue = asyncio.Queue()
+        self._queue = _ReceiveBuffer(self._max_buffer_bytes, self._max_buffer_chunks)
         self._sender = ThreadPoolExecutor(max_workers=1, thread_name_prefix="siyi-tcp-send")
         self._connected = True
         self._thread = threading.Thread(
             target=self._read_loop,
-            args=(sock, loop, self._queue, self._closing),
+            args=(sock, self._queue, self._closing),
             name="siyi-tcp-recv",
             daemon=True,
         )
@@ -134,33 +213,30 @@ class ThreadedTCPTransport(AbstractTransport):
     def _read_loop(
         self,
         sock: _Socket,
-        loop: asyncio.AbstractEventLoop,
-        queue: asyncio.Queue[_Item],
+        queue: _ReceiveBuffer,
         closing: threading.Event,
     ) -> None:
         buffer = memoryview(bytearray(self._read_size))
         ended: BaseException | None = None
         try:
             while not closing.is_set():
+                capacity = queue.capacity(self._read_size)
+                if not capacity:
+                    break
                 try:
-                    count = sock.recv_into(buffer)
+                    count = sock.recv_into(buffer[:capacity])
                 except TimeoutError:
                     continue
                 arrival = time.monotonic()
                 if count == 0:
                     break  # the peer closed the connection
-                self._post(loop, queue, (bytes(buffer[:count]), arrival))
+                queue.put(bytes(buffer[:count]), arrival)
         except OSError as e:
             if not closing.is_set():
                 ended = e
         if self._sock is sock:
             self._connected = False
-        self._post(loop, queue, ended)
-
-    @staticmethod
-    def _post(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[_Item], item: _Item) -> None:
-        with contextlib.suppress(RuntimeError):  # the loop has already shut down
-            loop.call_soon_threadsafe(queue.put_nowait, item)
+        queue.finish(ended)
 
     async def close(self) -> None:
         """Close the connection and stop the reader thread."""
@@ -190,7 +266,7 @@ class ThreadedTCPTransport(AbstractTransport):
             with contextlib.suppress(OSError):
                 sock.close()
         if queue is not None:
-            queue.put_nowait(None)  # wake a consumer that is waiting for data
+            queue.finish(discard=True)  # also wake a reader waiting for capacity
         if sender is not None:
             sender.shutdown(wait=False, cancel_futures=True)
         if thread is not None:

@@ -181,13 +181,19 @@ class FirmwareFrameParser:
             end = 16 + length
             if len(self._buffer) < end + 4:
                 break
-            if struct.unpack_from("<I", self._buffer, end)[0] != firmware_crc32(
-                bytes(self._buffer[:end])
-            ):
+            # Large keyframes otherwise copy each bytearray slice and then copy it again
+            # into bytes. Own the packet once; release both views before resizing the buffer.
+            packet = None
+            if end > 65536:
+                with memoryview(self._buffer) as view, view[:end] as span:
+                    packet = bytes(span)
+            actual_crc = firmware_crc32(packet if packet is not None else bytes(self._buffer[:end]))
+            if struct.unpack_from("<I", self._buffer, end)[0] != actual_crc:
                 self.discarded += 1
                 del self._buffer[0]
                 continue
-            frames.append(FirmwareFrame(command, bytes(self._buffer[16:end]), sequence, flags))
+            payload = packet[16:] if packet is not None else bytes(self._buffer[16:end])
+            frames.append(FirmwareFrame(command, payload, sequence, flags))
             del self._buffer[: end + 4]
         return frames
 

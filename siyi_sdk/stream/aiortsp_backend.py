@@ -154,6 +154,8 @@ class AiortspBackend(ThreadedBackend):
         epoch = -1
         assembler = None
         codec = None
+        latest = None
+        decoded_count = 0
         while not self._stop_event.is_set():
             with self._condition:
                 if not self._packets:
@@ -164,6 +166,7 @@ class AiortspBackend(ThreadedBackend):
                     continue
                 if epoch != self._epoch:
                     epoch = self._epoch
+                    latest, decoded_count = None, 0
                     mode, parameters = self._decode_config
                     assembler = H264Assembler(mode, parameters)
                     codec = av.CodecContext.create("h264", "r")
@@ -175,11 +178,13 @@ class AiortspBackend(ThreadedBackend):
                 ordered = self._jitter.feed(packet, time.monotonic())
             assert assembler is not None and codec is not None
             if damage:
+                latest, decoded_count = None, 0
                 assembler.loss()
                 codec = av.CodecContext.create("h264", "r")
                 codec.thread_count = 1
             for packet, gap in ordered:
                 if gap:
+                    latest, decoded_count = None, 0
                     codec = av.CodecContext.create("h264", "r")
                     codec.thread_count = 1
                 access_unit = assembler.feed(packet, gap)
@@ -191,28 +196,41 @@ class AiortspBackend(ThreadedBackend):
                     encoded.time_base = Fraction(1, 90000)
                     decoded = codec.decode(encoded)
                     for image in decoded:
-                        img = image.to_ndarray(format="bgr24")
-                        now = time.monotonic()
-                        if epoch != self._epoch or self._stop_event.is_set():
-                            break
-                        self._last_decoded = now
-                        if self._healthy_since is None:
-                            self._healthy_since = now
-                        self.state = StreamState.RUNNING
-                        if self._delivery:
-                            self._delivery.publish(
-                                StreamFrame(
-                                    cast(NDArray[np.uint8], img),
-                                    now,
-                                    image.width,
-                                    image.height,
-                                    self.BACKEND_NAME,
-                                )
-                            )
+                        latest = image
+                        decoded_count += 1
+                        if decoded_count >= 8:
+                            self._publish_image(latest, epoch)
+                            latest, decoded_count = None, 0
                 except av.FFmpegError:
+                    latest, decoded_count = None, 0
                     assembler.loss()
                     codec = av.CodecContext.create("h264", "r")
                     codec.thread_count = 1
+
+            with self._condition:
+                caught_up = not self._packets
+            if latest is not None and caught_up:
+                self._publish_image(latest, epoch)
+                latest, decoded_count = None, 0
+
+    def _publish_image(self, image: Any, epoch: int) -> None:  # noqa: ANN401
+        """Convert only the newest picture of a bounded catch-up batch."""
+        if epoch != self._epoch or self._stop_event.is_set():
+            return
+        img = image.to_ndarray(format="bgr24")
+        now = time.monotonic()
+        if epoch != self._epoch or self._stop_event.is_set():
+            return
+        self._last_decoded = now
+        if self._healthy_since is None:
+            self._healthy_since = now
+        self.state = StreamState.RUNNING
+        if self._delivery:
+            self._delivery.publish(
+                StreamFrame(
+                    cast(NDArray[np.uint8], img), now, image.width, image.height, self.BACKEND_NAME
+                )
+            )
 
     async def _session_loop(self) -> None:
         attempts = 0
