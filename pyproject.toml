@@ -7,7 +7,7 @@ name = "siyi-sdk"
 version = "0.6.0"
 description = "Async Python SDK for the SIYI A8 Mini gimbal camera"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "SIYI SDK Contributors" }]
 classifiers = [
@@ -30,12 +30,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-stream         = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
-stream-opencv  = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
-stream-gst     = ["numpy>=1.21,<2.3", "PyGObject>=3.42"]
-stream-aiortsp = ["numpy>=1.21,<2.3", "aiortsp>=1.4,<2", "av>=14"]
-web            = ["numpy>=1.21,<2.3", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5", "aiortsp>=1.4,<2", "av>=14"]
-tracking       = ["numpy>=1.21,<2.3", "opencv-python>=4.5"]
+stream         = ["numpy>=1.21", "opencv-python>=4.5"]
+stream-opencv  = ["numpy>=1.21", "opencv-python>=4.5"]
+stream-gst     = ["numpy>=1.21", "PyGObject>=3.42"]
+stream-aiortsp = ["numpy>=1.21", "aiortsp>=1.4,<2", "av>=14"]
+web            = ["numpy>=1.21", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5", "aiortsp>=1.4,<2", "av>=14"]
+tracking       = ["numpy>=1.21", "opencv-python>=4.5"]
 
 [dependency-groups]
 dev = [
@@ -48,7 +48,7 @@ dev = [
     "black>=24.3,<26",
     "pre-commit>=3.7,<5",
     "opencv-python>=4.5",
-    "numpy>=1.21,<2.3",
+    "numpy>=1.21",
 ]
 
 [project.urls]
@@ -67,7 +67,7 @@ dependencies = [
     "black>=24.3,<26",
     "pre-commit>=3.7,<5",
     "opencv-python>=4.5",
-    "numpy>=1.21,<2.3",
+    "numpy>=1.21",
 ]
 
 [tool.hatch.envs.default.env-vars]
@@ -75,7 +75,7 @@ PYTHONPATH = ""
 
 [tool.hatch.envs.test]
 dependencies = [
-    "numpy>=1.21,<2.3",
+    "numpy>=1.21",
     "opencv-python>=4.5",
     "aiortsp>=1.4,<2",
     "av>=14",
@@ -97,7 +97,7 @@ dependencies = [
     "ruff>=0.5,<1",
     "black>=24.3,<26",
     "mypy>=1.10,<2",
-    "numpy>=1.21,<2.3",
+    "numpy>=1.21",
     "opencv-python>=4.5",
 ]
 
@@ -166,8 +166,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-markers = ["hil: hardware-in-the-loop tests (skipped by default)"]
-addopts = "-ra --strict-markers -p no:launch_testing -p no:launch_testing_ros_pytest_entrypoint"
+markers = ["hil: hardware-in-the-loop tests (run with SIYI_HIL=1; skipped by default)"]
+addopts = "-ra --strict-markers"
 
 [tool.coverage.run]
 source = ["siyi_sdk"]

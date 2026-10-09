@@ -157,7 +157,9 @@ def encode_gimbal_stream(data_type: GimbalDataType, freq: DataStreamFreq) -> byt
         GimbalDataType.MAGNETIC_ENCODER,
         GimbalDataType.MOTOR_VOLTAGE,
     ):
-        raise ConfigurationError(f"data_type must be ATTITUDE, MAGNETIC_ENCODER, or MOTOR_VOLTAGE, got {data_type}")
+        raise ConfigurationError(
+            f"data_type must be ATTITUDE, MAGNETIC_ENCODER, or MOTOR_VOLTAGE, got {data_type}"
+        )
     return struct.pack("<BB", data_type, freq)
 
 

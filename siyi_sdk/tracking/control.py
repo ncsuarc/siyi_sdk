@@ -159,6 +159,7 @@ class GimbalPredictor:
         self._sent: deque[tuple[float, float, float]] = deque()
 
     def reset(self) -> None:
+        """Forget the commands sent so far."""
         self._sent.clear()
 
     def record(self, t: float, rate: tuple[float, float]) -> None:
@@ -381,10 +382,11 @@ class TurnRateEstimator:
         costs = []
         for dead_time in candidates:
             cost = 0.0
-            for (_, *actual), predicted in zip(self._windows, self._turns(dead_time)):
+            for (_, *actual), predicted in zip(self._windows, self._turns(dead_time), strict=False):
                 for axis in (0, 1):
-                    if actual[axis] is not None:
-                        cost += (actual[axis] - self.scale[axis] * predicted[axis]) ** 2
+                    observed = actual[axis]
+                    if observed is not None:
+                        cost += (observed - self.scale[axis] * predicted[axis]) ** 2
             costs.append(cost)
         best = min(range(len(costs)), key=costs.__getitem__)
         # Without enough motion every dead time fits alike: keep the estimate.

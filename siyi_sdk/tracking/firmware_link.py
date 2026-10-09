@@ -29,7 +29,7 @@ from siyi_sdk.firmware_tracking import CANCEL_SETTLE, FirmwareTrackingClient, Tr
 logger = logging.getLogger(__name__)
 
 # Decoded frame (BGR, 1280x720) and its estimated monotonic capture time (see CaptureClock).
-FrameSink = Callable[[np.ndarray, float], Awaitable[None]]
+FrameSink = Callable[[np.ndarray[Any, Any], float], Awaitable[None]]
 
 RETRY_DELAY = 2.0
 VIDEO_STALL = 3.0  # reconnect when no video packet arrives for this long
@@ -163,7 +163,7 @@ class FirmwareLink:
             self._note("video_stats", **self._stats.summary(now))
             self._stats = _VideoStats()
 
-    def _note(self, event: str, **fields: Any) -> None:
+    def _note(self, event: str, **fields: Any) -> None:  # noqa: ANN401
         if self._trace is not None:
             with contextlib.suppress(Exception):
                 self._trace(event, fields)
@@ -264,7 +264,7 @@ class FirmwareLink:
                 self.last_frame_time = time.monotonic()
                 await self._on_frame(image, batch[-1][3])
 
-    def _decode(self, batch: list[tuple[int, bytes, float, float]]) -> np.ndarray | None:
+    def _decode(self, batch: list[tuple[int, bytes, float, float]]) -> np.ndarray[Any, Any] | None:
         import av
 
         latest = None

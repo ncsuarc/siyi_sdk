@@ -9,7 +9,7 @@ from siyi_sdk.protocol.frame import Frame
 from siyi_sdk.transport.mock import MockTransport
 
 pytest.importorskip("fastapi")
-from web_ui.frame_tap import TapTransport  # noqa: E402
+from web_ui.frame_tap import TapTransport
 
 
 async def _drain(tap: TapTransport, count: int) -> list[bytes]:
@@ -78,7 +78,8 @@ def test_command_catalog_marks_read_only_commands() -> None:
     testclient = pytest.importorskip("fastapi.testclient")
     from web_ui.server import app
 
-    commands = {item["name"]: item for item in testclient.TestClient(app).get("/api/sdk/commands").json()}
+    listing = testclient.TestClient(app).get("/api/sdk/commands").json()
+    commands = {item["name"]: item for item in listing}
     assert commands["get_firmware_version"]["read_only"] is True
     assert commands["rotate"]["read_only"] is False
     assert commands["format_sd_card"]["read_only"] is False

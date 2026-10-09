@@ -90,6 +90,7 @@ class TargetEstimator:
 
     @property
     def started(self) -> bool:
+        """Whether the first measurement has arrived."""
         return self._t is not None
 
     def update(

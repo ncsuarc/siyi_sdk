@@ -108,7 +108,7 @@ class TCPTransport(AbstractTransport):
         logger.info("disconnected", transport="tcp")
 
     @property
-    def socket(self) -> Any:
+    def socket(self) -> Any:  # noqa: ANN401
         """The connected socket object, or None (for socket options and diagnostics)."""
         return self._writer.get_extra_info("socket") if self._writer else None
 

@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from siyi_sdk import constants
 from siyi_sdk.transport.base import AbstractTransport
 from siyi_sdk.transport.threaded_tcp import ThreadedTCPTransport
 
@@ -32,7 +33,7 @@ CANCEL_SETTLE = 0.06
 _MAGIC = b"\x55\x66\xaa\xbb"
 _MAX_PAYLOAD = 4096 - 20  # receive buffer in the inspected camera firmware
 # Received packets can be larger: 0x90 carries whole encoded frames (cardv caps them near 358 KB).
-_MAX_RX_PAYLOAD = 0x60000
+_MAX_RX_PAYLOAD = 384 * 1024
 # One encoded video frame from the camera's 0x90 stream: (frame counter, H.265 Annex-B
 # access unit, monotonic arrival time).
 VideoSink = Callable[[int, bytes, float], None]
@@ -45,7 +46,7 @@ def _no_trace(event: str, fields: dict[str, Any]) -> None:
     pass
 
 
-def disable_delayed_ack(sock: Any) -> bool:
+def disable_delayed_ack(sock: Any) -> bool:  # noqa: ANN401 - any socket-like object
     """Make Windows acknowledge every received TCP segment at once.
 
     The camera appears to hold each video frame's last partial segment until
@@ -58,7 +59,7 @@ def disable_delayed_ack(sock: Any) -> bool:
     import ctypes
     from ctypes import wintypes
 
-    sio_tcp_set_ack_frequency = 0x98000017  # _WSAIOW(IOC_VENDOR, 23)
+    sio_tcp_set_ack_frequency = constants.SIO_TCP_SET_ACK_FREQUENCY
     frequency = wintypes.DWORD(1)
     returned = wintypes.DWORD(0)
     wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
@@ -67,20 +68,20 @@ def disable_delayed_ack(sock: Any) -> bool:
                           ctypes.c_void_p, ctypes.c_void_p]
     result = wsa_ioctl(sock.fileno(), sio_tcp_set_ack_frequency, ctypes.byref(frequency),
                        ctypes.sizeof(frequency), None, 0, ctypes.byref(returned), None, None)
-    return result == 0
+    return bool(result == 0)
 
 
 def _ms(started: float) -> float:
     return round((time.monotonic() - started) * 1000, 1)
 
 
-def _socket_details(sock: Any) -> dict[str, Any]:
+def _socket_details(sock: Any) -> dict[str, Any]:  # noqa: ANN401
     """Local address and buffer sizes of a connected socket, for the trace (best effort)."""
     import socket
 
     details: dict[str, Any] = {}
     with contextlib.suppress(Exception):
-        details["local"] = "%s:%s" % sock.getsockname()[:2]
+        details["local"] = "{}:{}".format(*sock.getsockname()[:2])
         details["rcvbuf"] = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
         details["nodelay"] = bool(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
     return details
@@ -104,7 +105,8 @@ def firmware_crc32(data: bytes) -> int:
     the firmware's CRC in C. A pure-Python loop took ~7 ms per 5 KB video frame,
     enough to make the dashboard fall about a second behind the 0x90 stream.
     """
-    register = zlib.crc32(bytes(data).translate(_REVERSED_BYTES), 0xFFFFFFFF) ^ 0xFFFFFFFF
+    mask = constants.CRC32_XOR_MASK
+    register = zlib.crc32(bytes(data).translate(_REVERSED_BYTES), mask) ^ mask
     return int(f"{register:032b}"[::-1], 2)
 
 
@@ -212,11 +214,11 @@ class FirmwareTrackingClient:
         self.video_frames = 0
         self.error: str | None = None
 
-    def _emit(self, event: str, **fields: Any) -> None:
+    def _emit(self, event: str, **fields: Any) -> None:  # noqa: ANN401
         with contextlib.suppress(Exception):
             self._trace(event, fields)
 
-    def note(self, event: str, **fields: Any) -> None:
+    def note(self, event: str, **fields: Any) -> None:  # noqa: ANN401
         """Record a caller's diagnostic event in this connection's trace."""
         self._emit(event, **fields)
 

@@ -407,3 +407,9 @@ A8MINI_MAX_ZOOM: Final[float] = 6.0
 # Velocity command range for CMD 0x07 (gimbal rotation).
 GIMBAL_RATE_CMD_MIN: Final[int] = -100
 GIMBAL_RATE_CMD_MAX: Final[int] = 100
+
+# Windows SIO_TCP_SET_ACK_FREQUENCY ioctl code, _WSAIOW(IOC_VENDOR, 23).
+SIO_TCP_SET_ACK_FREQUENCY: Final[int] = 0x98000017
+
+# Initial register value and final XOR of the standard CRC-32 (zlib.crc32 seed handling).
+CRC32_XOR_MASK: Final[int] = 0xFFFFFFFF

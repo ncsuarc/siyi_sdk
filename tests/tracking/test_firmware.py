@@ -169,7 +169,9 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             transport.mode = True
         transport.drop_enable_reply = outcome == "activation_timeout"
         client = FirmwareTrackingClient(transport=transport)
-        monkeypatch.setattr(server, "FirmwareTrackingClient", lambda *_, client=client, **__: client)
+        monkeypatch.setattr(
+            server, "FirmwareTrackingClient", lambda *_, client=client, **__: client
+        )
         state = server.CameraState()
         state.client = AsyncMock()
         state.ip = "192.168.144.25"
@@ -190,7 +192,8 @@ async def test_firmware_activation_release_stale_and_disconnect(monkeypatch):
             # AI mode left on by an earlier, unconfirmed exit is switched off, then the lock starts.
             snapshot = await state.start_lock(0, 0)
             assert snapshot["state"] == "locked"
-            assert [p[11] for p in transport.sent_frames[:6]] == [0xA2, 0xA3, 0xA2, 0xA3, 0xA2, 0xAB]
+            sent_cmds = [p[11] for p in transport.sent_frames[:6]]
+            assert sent_cmds == [0xA2, 0xA3, 0xA2, 0xA3, 0xA2, 0xAB]
             assert transport.sent_frames[1][16] == 0  # the leftover mode is disabled first
             await state.release_lock()
             assert state.point_lock is None and not transport.mode

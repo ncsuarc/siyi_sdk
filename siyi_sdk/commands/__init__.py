@@ -14,7 +14,6 @@ from siyi_sdk.commands.attitude import (
     encode_magnetic_encoder,
     encode_raw_gps,
 )
-
 from siyi_sdk.commands.camera import (
     decode_camera_system_info,
     decode_format_sd_ack,
@@ -35,7 +34,6 @@ from siyi_sdk.commands.camera import (
     encode_set_osd_flag,
     encode_set_pic_name_type,
 )
-
 from siyi_sdk.commands.debug import (
     decode_control_mode,
     decode_motor_voltage,
@@ -50,7 +48,6 @@ from siyi_sdk.commands.debug import (
     encode_set_weak_control_mode,
     encode_set_weak_threshold,
 )
-
 from siyi_sdk.commands.gimbal import (
     decode_gimbal_mode,
     decode_one_key_centering_ack,
@@ -63,7 +60,6 @@ from siyi_sdk.commands.gimbal import (
     encode_set_attitude,
     encode_single_axis,
 )
-
 from siyi_sdk.commands.system import (
     decode_firmware_version,
     decode_get_ip,
@@ -83,7 +79,6 @@ from siyi_sdk.commands.system import (
     encode_soft_reboot,
     encode_system_time,
 )
-
 from siyi_sdk.commands.zoom import (
     decode_absolute_zoom_ack,
     decode_current_zoom,

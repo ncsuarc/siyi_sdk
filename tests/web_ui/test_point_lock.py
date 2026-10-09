@@ -53,6 +53,7 @@ def frame(image: np.ndarray, t: float) -> SimpleNamespace:
 
 async def test_lock_steers_and_draws(camera, ground) -> None:
     # Lock a spot to the right of centre: the gimbal should turn right.
+    camera.preview_viewers = 1  # the preview is only encoded while a browser is watching
     snapshot = await camera.start_lock(0.25, 0.0)
     assert snapshot["state"] == "locked"
     for t in range(3):
@@ -61,6 +62,8 @@ async def test_lock_steers_and_draws(camera, ground) -> None:
     snap = camera.lock_snapshot()
     assert snap["state"] == "locked" and snap["x"] == pytest.approx(0.25, abs=0.01)
     assert snap["error_deg"][0] > 0
+    if camera.preview_task:
+        await camera.preview_task
     assert camera.latest_frame  # the marked frame was encoded for the browser
 
 
@@ -118,6 +121,7 @@ async def test_lock_uses_angle_targets_when_attitude_is_streaming(camera, ground
     now = time.monotonic()
     for i in range(40):  # half a second of a still gimbal at 80 Hz
         camera.attitude_history.add(now - 0.5 + i / 80, 0.0, 0.0)
+    camera.preview_viewers = 1  # the preview is only encoded while a browser is watching
     snapshot = await camera.start_lock(0.25, 0.0)
     assert snapshot["state"] == "locked"
     assert camera.point_lock.control == "angle" and camera.point_lock.compensated

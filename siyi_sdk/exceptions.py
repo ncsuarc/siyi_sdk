@@ -13,6 +13,7 @@ organized in a hierarchical structure for granular error handling.
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 # =============================================================================
 # Base Exception
 # =============================================================================

@@ -196,7 +196,8 @@ class SimGimbal:
     async def _stalls(self) -> None:
         while self.cfg.stall_every > 0:
             await asyncio.sleep(self.cfg.stall_every)
-            time.sleep(self.cfg.stall_s)  # blocks every task, like a starved process
+            # Blocks every task, like a starved process.
+            time.sleep(self.cfg.stall_s)  # noqa: ASYNC251
 
     async def __aenter__(self) -> SimGimbal:
         self.t0 = time.monotonic()

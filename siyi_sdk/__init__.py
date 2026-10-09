@@ -30,22 +30,51 @@ _STREAM_EXPORTS = frozenset(
 )
 
 
+_TRACKING_EXPORTS = frozenset(
+    {
+        "AttitudeHistory",
+        "FirmwarePointLock",
+        "GimbalPointLock",
+        "LockGains",
+        "LockMetrics",
+        "LockState",
+        "LockStatus",
+        "PointLock",
+        "RateController",
+    }
+)
+
+
 def __getattr__(name: str) -> Any:  # noqa: ANN401 - dynamic lazy re-exports
-    """Load optional video dependencies only when a video export is requested."""
-    if name not in _STREAM_EXPORTS:
+    """Load optional video and tracking dependencies only when first requested."""
+    if name == "tracking":
+        value: Any = import_module("siyi_sdk.tracking")
+    elif name in _STREAM_EXPORTS:
+        value = getattr(import_module("siyi_sdk.stream"), name)
+    elif name in _TRACKING_EXPORTS:
+        value = getattr(import_module("siyi_sdk.tracking"), name)
+    else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module("siyi_sdk.stream"), name)
     globals()[name] = value
     return value
 
 
 __version__ = "0.6.0"
 __all__ = [
+    "AttitudeHistory",
+    "FirmwarePointLock",
     "FirmwareTrackingClient",
+    "GimbalPointLock",
+    "LockGains",
+    "LockMetrics",
+    "LockState",
+    "LockStatus",
     "MediaClient",
     "MediaDirectory",
     "MediaFile",
     "MediaType",
+    "PointLock",
+    "RateController",
     "SIYIClient",
     "SIYIStream",
     "StreamBackend",
@@ -57,4 +86,5 @@ __all__ = [
     "connect_serial",
     "connect_tcp",
     "connect_udp",
+    "tracking",
 ]

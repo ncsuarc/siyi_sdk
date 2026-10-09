@@ -11,8 +11,8 @@ from siyi_sdk.tracking.control import (
     GimbalPredictor,
     LockGains,
     LoopModel,
-    RateController,
     OscillationGuard,
+    RateController,
     TurnRateEstimator,
     pixel_error_deg,
 )

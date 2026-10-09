@@ -20,7 +20,6 @@ from siyi_sdk.tracking.control import pixel_error_deg
 from siyi_sdk.tracking.gimbal import _ATTITUDE_STALE_S, LockState, LockStatus
 from siyi_sdk.tracking.point_lock import Image, PointLock, PointModel
 
-
 # Integrate the offset only within this fraction of the frame width of the centre, and
 # let the integral term shift the target by at most this fraction of the width.
 _INTEGRAL_ZONE = 0.05
@@ -201,10 +200,11 @@ class FirmwarePointLock:
 
     def _predict(self, x: float, y: float, width: int, height: int) -> tuple[float, float]:
         """Move a captured-frame point to where the gimbal's turn since capture puts it now."""
-        latest = self._attitude.latest() if self._attitude is not None else None
-        if latest is None or time.monotonic() - latest[0] > _ATTITUDE_STALE_S:
+        history = self._attitude
+        latest = history.latest() if history is not None else None
+        if history is None or latest is None or time.monotonic() - latest[0] > _ATTITUDE_STALE_S:
             return x, y
-        then = self._attitude.at(self._last_timestamp - self._video_delay)
+        then = history.at(self._last_timestamp - self._video_delay)
         if then is None:
             return x, y
         turned_yaw = (latest[1] - then[0]) * self._signs[0]

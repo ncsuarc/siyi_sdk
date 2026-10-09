@@ -141,3 +141,8 @@ dmypy.json
 *~
 .DS_Store
 .tools/
+
+# Local captures and scratch output
+ai_stream_capture.bin
+output.txt
+replies.txt

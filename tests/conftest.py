@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
+import structlog
 
 from siyi_sdk.client import SIYIClient
 from siyi_sdk.constants import (
@@ -404,3 +405,11 @@ def frame_set_ip_ack() -> bytes:
     """Set IP ACK frame (0x82) with sta=1."""
     payload = struct.pack("<B", 1)
     return Frame(ctrl=CTRL_ACK_PACK, seq=55, cmd_id=CMD_SET_IP, data=payload).to_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog() -> Iterator[None]:
+    """Give every test the default logging setup, whatever an earlier test configured."""
+    structlog.reset_defaults()
+    yield
+    structlog.reset_defaults()

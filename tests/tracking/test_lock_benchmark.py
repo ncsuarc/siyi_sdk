@@ -86,7 +86,9 @@ async def run_profile(
         async def on_frame(frame) -> None:
             if not first:
                 first["captured"] = frame.captured
-                lock.lock(frame.frame, W / 2 + offset[0] * PX_PER_DEG, H / 2 - offset[1] * PX_PER_DEG)
+                lock.lock(
+                    frame.frame, W / 2 + offset[0] * PX_PER_DEG, H / 2 - offset[1] * PX_PER_DEG
+                )
                 return
             await lock.update(frame.frame, timestamp=frame.timestamp)
 

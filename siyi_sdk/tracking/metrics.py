@@ -8,9 +8,10 @@ an exported log and the simulator. All angles are degrees.
 - **Jitter:** direction reversals of the speed command per second, per axis. A smooth lock
   reverses only when the target does; a twitchy one reverses many times a second.
 - **Events:** a jump is the error growing past ``jump_deg`` while no earlier jump is still
-  being recovered from (the first is usually the lock's initial acquisition). Each event records how long the error took to halve (``half_s``),
-  how long until it stayed under ``settle_deg`` (``settle_s``), and how far it overshot
-  past the target (``overshoot_deg``, along the direction of the jump).
+  being recovered from (the first is usually the lock's initial acquisition). Each event
+  records how long the error took to halve (``half_s``), how long until it stayed under
+  ``settle_deg`` (``settle_s``), and how far it overshot past the target (``overshoot_deg``,
+  along the direction of the jump).
 - **Gaps:** the longest time between samples, which shows a stalled control loop.
 """
 
@@ -72,11 +73,10 @@ class LockMetrics:
                 self._signs[axis] = sign
 
         event = self._open
-        if event is None:
-            if magnitude > self.jump_deg:
-                direction = (error[0] / magnitude, error[1] / magnitude)
-                event = self._open = _Event(t, direction, magnitude)
-                self._events.append(event)
+        if event is None and magnitude > self.jump_deg:
+            direction = (error[0] / magnitude, error[1] / magnitude)
+            event = self._open = _Event(t, direction, magnitude)
+            self._events.append(event)
         if event is not None:
             event.peak = max(event.peak, magnitude)
             along = error[0] * event.direction[0] + error[1] * event.direction[1]

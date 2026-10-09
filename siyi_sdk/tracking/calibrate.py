@@ -277,7 +277,8 @@ async def measure_threshold(
         samples = [s for s in attitude.samples if start + hold_s / 2 <= s[0] <= end + 0.05]
         moved = False
         if len(samples) >= 3:
-            rate = (samples[-1][1 + index] - samples[0][1 + index]) / (samples[-1][0] - samples[0][0])
+            span = samples[-1][0] - samples[0][0]
+            rate = (samples[-1][1 + index] - samples[0][1 + index]) / span
             moved = abs(rate) >= 0.5 * abs(deg_per_unit) * speed
         await asyncio.sleep(0.2)
         if moved:
@@ -372,8 +373,11 @@ async def calibrate_loop(
             threshold[name] = await measure_threshold(
                 send, attitude, axis=name, deg_per_unit=fast.deg_per_unit_attitude
             )
-    yaw_rate = per_unit["yaw"] * yaw_sign
-    pitch_rate = per_unit["pitch"] * pitch_sign if per_unit["pitch"] is not None else yaw_rate
+    yaw_per_unit = per_unit["yaw"]
+    assert yaw_per_unit is not None
+    yaw_rate = yaw_per_unit * yaw_sign
+    pitch_per_unit = per_unit["pitch"]
+    pitch_rate = pitch_per_unit * pitch_sign if pitch_per_unit is not None else yaw_rate
     model = LoopModel(
         # The controller works in image-aligned terms, so fold the attitude sign in.
         deg_per_unit=(yaw_rate, pitch_rate),
