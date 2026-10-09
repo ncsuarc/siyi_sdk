@@ -27,6 +27,7 @@ from siyi_sdk.tracking.control import (
     LockGains,
     LoopModel,
     RateController,
+    TurnRateEstimator,
     pixel_error_deg,
 )
 from siyi_sdk.tracking.estimator import TargetEstimator
@@ -78,6 +79,10 @@ class LockStatus:
         on_screen: Whether the spot is inside the frame.
         compensated: Whether attitude-based delay compensation is active.
         target_rate_deg_s: Estimated (yaw, pitch) angular velocity of the spot.
+        turn_scale: Learned (yaw, pitch) correction to the calibrated turn rate
+            (actual / calibrated); 1 until the gimbal has turned enough to tell.
+        gain_scale: Factor the oscillation guard applies to the gains; 1 unless the
+            loop has been ringing.
     """
 
     state: LockState
@@ -91,6 +96,8 @@ class LockStatus:
     on_screen: bool = True
     compensated: bool = False
     target_rate_deg_s: tuple[float, float] = (0.0, 0.0)
+    turn_scale: tuple[float, float] = (1.0, 1.0)
+    gain_scale: float = 1.0
 
 
 class GimbalPointLock:
@@ -147,6 +154,7 @@ class GimbalPointLock:
         trust_video_delay: bool = False,
         angle_pitch_offset: float = 0.0,
         smith: bool | None = None,
+        turn_rate: TurnRateEstimator | None = None,
         send: SendRate | None = None,
         send_angle: SendAngle | None = None,
     ) -> None:
@@ -176,6 +184,9 @@ class GimbalPointLock:
             smith: Steer against where the gimbal will be once the commands in flight
                 take effect (:class:`GimbalPredictor`), which allows a higher gain. By
                 default on for rate control with attitude and a measured motor lag.
+            turn_rate: Turn-rate estimator to continue from, so what one lock learned
+                carries into the next; a new one by default. Only used for rate control
+                with attitude, and only meaningful for the same calibrated ``loop``.
             send: Coroutine taking (yaw, pitch) speeds; defaults to ``client.rotate_nowait``.
             send_angle: Coroutine taking (yaw, pitch) degrees in reported-attitude
                 terms; defaults to ``client.set_attitude_nowait``.
@@ -208,6 +219,16 @@ class GimbalPointLock:
             or LockGains.for_model(self.loop, compensated=attitude is not None, smith=smith),
             self.loop,
         )
+        # Online turn-rate estimate (rate control with attitude): corrects the calibrated
+        # deg_per_unit for battery sag, payload and mount, keeping the loop gain as tuned.
+        self.adapt_turn_rate = True
+        self.turn_rate: TurnRateEstimator | None = None
+        if control == "rate" and attitude is not None:
+            self.turn_rate = turn_rate or TurnRateEstimator(
+                self.loop.dead_time_s, self.loop.motor_tau_s
+            )
+            self.controller.turn_scale = list(self.turn_rate.scale)
+            self._sync_dead_time()
         self.min_score = min_score
         self.lost_timeout = lost_timeout
         self._tracker: PointLock | None = None
@@ -262,6 +283,8 @@ class GimbalPointLock:
         self.controller.reset()
         if self.predictor is not None:
             self.predictor.reset()
+        if self.turn_rate is not None:
+            self.turn_rate.reset_history()
         self._last_time = None
         self._lost_since = None
         self._target = None
@@ -362,7 +385,8 @@ class GimbalPointLock:
         await self._command(command)
         self.metrics.add(now, error, command)
         self.status = LockStatus(
-            LockState.LOCKED, x, y, width, height, score, error, command, on_screen, False
+            LockState.LOCKED, x, y, width, height, score, error, command, on_screen, False,
+            gain_scale=self.controller.gain_scale,
         )
         return self.status
 
@@ -483,8 +507,9 @@ class GimbalPointLock:
             )
             await self._command(command)
             if self.predictor is not None:
-                per_unit = self.loop.deg_per_unit
-                self.predictor.record(now, (command[0] * per_unit[0], command[1] * per_unit[1]))
+                self.predictor.record(now, self.controller.delivered_rate(command))
+            if self.turn_rate is not None and self.adapt_turn_rate:
+                self._learn_turn_rate(now, command, latest)
         self.metrics.add(now, error, command)
         s = self.status
         self.status = LockStatus(
@@ -499,7 +524,37 @@ class GimbalPointLock:
             s.on_screen,
             True,
             velocity,
+            (self.controller.turn_scale[0], self.controller.turn_scale[1]),
+            self.controller.gain_scale,
         )
+
+    def _learn_turn_rate(
+        self, now: float, command: tuple[int, int], latest: tuple[float, float, float]
+    ) -> None:
+        """Fit the turn rate to the attitude stream and hand the result to the controller."""
+        assert self.attitude is not None and self.turn_rate is not None
+        estimator = self.turn_rate
+        # Against the calibrated model: the estimate is a correction to it, not to itself.
+        estimator.record(now, self.controller.delivered_rate(command, scaled=False))
+        for axis in (0, 1):
+            if abs(command[axis]) >= self.controller.gains.max_speed:
+                estimator.saturated(now, axis)
+        before = self.attitude.at(latest[0] - estimator.window_s)
+        if before is None:
+            return
+        estimator.observe(latest[0], self._flip(latest[1], latest[2]), self._flip(*before))
+        self.controller.turn_scale = list(estimator.scale)
+        self._sync_dead_time()
+
+    def _sync_dead_time(self) -> None:
+        """Use the estimator's dead time in the loop model and the Smith predictor."""
+        assert self.turn_rate is not None
+        dead_time = self.turn_rate.dead_time_s
+        if dead_time == self.loop.dead_time_s:
+            return
+        self.loop.command_delay_s = dead_time + self.loop.motor_tau_s
+        if self.predictor is not None:
+            self.predictor.dead_time_s = dead_time
 
     async def _command(self, command: tuple[int, int]) -> None:
         # Repeated stops add nothing; anything else is resent every step.

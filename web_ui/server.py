@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 import cv2
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -59,6 +59,7 @@ from web_ui.pointing import (
 from web_ui.lock_overlay import draw_firmware_command, draw_lock, draw_tracking_debug
 from siyi_sdk.tracking import (
     CalibrationError, FirmwareLink, FirmwarePointLock, FrameMotionRecorder, GimbalPointLock, LockGains, LockState, LoopModel,
+    TurnRateEstimator,
     calibrate_loop,
 )
 
@@ -223,6 +224,8 @@ class CameraState:
         self.pointing = PointingConfig()
         self.attitude_history = AttitudeHistory()
         self.zoom: Optional[float] = None
+        # (calibration key, estimator) carried across locks; see turn_rate_for.
+        self._turn_rate: Optional[tuple[tuple, TurnRateEstimator]] = None
         self.zoom_max: Optional[float] = None
         # Pose and zoom captured when a drag or wheel gesture began.
         self.gesture: Optional[dict] = None
@@ -230,6 +233,9 @@ class CameraState:
         # Point lock steers the gimbal from the video; raw frames are kept to start a lock.
         self.point_lock: Optional[GimbalPointLock | FirmwarePointLock] = None
         self.lock_serial = 0  # numbers app locks in the trace
+        # Read in a thread by the diagnostics endpoint: two git subprocesses on the event
+        # loop stalled it ~135 ms every time the page refreshed its log copy.
+        self.git_rev: Optional[str] = None
         self.summarized_lock: Optional[GimbalPointLock] = None
         # Firmware tracking channel (port 37256) frames and lock events, for the protocol export.
         self.tracking_log: deque = deque(maxlen=5000)
@@ -478,6 +484,9 @@ class CameraState:
                         "error_deg": [round(v, 2) for v in status.error_deg],
                         "command": list(status.command),
                         "target_rate": [round(v, 1) for v in status.target_rate_deg_s],
+                        "turn_scale": [round(v, 3) for v in status.turn_scale],
+                        "gain_scale": round(status.gain_scale, 3),
+                        "command_delay_ms": round(lock.loop.command_delay_s * 1000, 1),
                         "video_delay_ms": round(lock.loop.video_delay_s * 1000, 1),
                         "frame_age_ms": round((time.monotonic() - frame.timestamp) * 1000, 1),
                         "source": "link" if self.link_live() else "rtsp",
@@ -663,6 +672,8 @@ class CameraState:
             command_delay_s=cfg.command_delay_ms / 1000,
             video_delay_s=cfg.frame_delay_ms / 1000,
             motor_tau_s=cfg.motor_tau_ms / 1000,
+            deadzone_units=(cfg.deadzone_yaw, cfg.deadzone_pitch),
+            min_units=(cfg.min_units_yaw, cfg.min_units_pitch),
         )
 
     async def start_lock(self, x: float, y: float) -> dict:
@@ -720,6 +731,8 @@ class CameraState:
                 raise HTTPException(status_code=503, detail=self.lock_reason) from exc
             return self.lock_snapshot()
         self.apply_mount_profile()
+        # Pixel errors become angles through the zoom; make sure it isn't stale.
+        await self.refresh_zoom()
         loop = self.loop_model()
         # With attitude available the delay is compensated, so the gain follows the command delay.
         compensated = self.attitude_history.latest() is not None
@@ -738,7 +751,7 @@ class CameraState:
             control=cfg.lock_control if compensated else "rate",
             trust_video_delay=cfg.calibrated,
             angle_pitch_offset=180.0 if self.mounted_inverted() else 0.0,
-            smith=smith,
+            smith=smith, turn_rate=self.turn_rate_for(loop),
         )
         lock.lock(image, (x + 0.5) * width, (y + 0.5) * height, size=max(40, width // 20))
         self.lock_serial += 1
@@ -746,6 +759,51 @@ class CameraState:
         self.lock_reason = None
         self.lock_last_command = None  # always send the first command of a new lock
         return self.lock_snapshot()
+
+    def turn_rate_for(self, loop: LoopModel) -> Optional[TurnRateEstimator]:
+        """The turn-rate estimate learned by earlier locks, while the calibration is unchanged.
+
+        It is a correction to the calibrated turn rate, so a new calibration (or mount
+        profile) starts it over.
+        """
+        key = (loop.deg_per_unit, loop.dead_time_s, loop.motor_tau_s)
+        if self._turn_rate is None or self._turn_rate[0] != key:
+            self._turn_rate = (key, TurnRateEstimator(loop.dead_time_s, loop.motor_tau_s))
+        return self._turn_rate[1]
+
+    def learned_loop(self) -> dict:
+        """What locks have learned about the turn rate and command delay, vs. the calibration."""
+        cfg = self.pointing
+        estimator = self._turn_rate[1] if self._turn_rate else None
+        if estimator is None or min(estimator.samples) < 50:
+            return {"ready": False, "samples": list(estimator.samples) if estimator else [0, 0]}
+        return {
+            "ready": True, "samples": list(estimator.samples),
+            "turn_scale": [round(v, 3) for v in estimator.scale],
+            "deg_per_unit": [round(cfg.deg_per_unit_yaw * estimator.scale[0], 4),
+                             round(cfg.deg_per_unit_pitch * estimator.scale[1], 4)],
+            "command_delay_ms": round((estimator.dead_time_s + cfg.motor_tau_ms / 1000) * 1000, 1),
+        }
+
+    async def apply_learned_loop(self) -> dict:
+        """Fold the learned turn rate and command delay into the calibration.
+
+        The estimate is a correction to the calibration it was learned against, so it
+        starts over afterwards; a running lock keeps steering with what it has.
+        """
+        async with self.tracking_lock:
+            learned = self.learned_loop()
+            if not learned["ready"]:
+                raise HTTPException(status_code=409, detail=(
+                    "Not enough learned yet: lock onto a moving spot (or pan while locked) so the "
+                    f"gimbal turns on both axes for a while. Windows so far: {learned['samples']}."))
+            cfg = self.pointing
+            cfg.deg_per_unit_yaw, cfg.deg_per_unit_pitch = learned["deg_per_unit"]
+            cfg.command_delay_ms = learned["command_delay_ms"]
+            if cfg.mount_profiles:
+                self.store_mount_profile()
+            self._turn_rate = None
+        return {"config": vars(cfg), "applied": learned}
 
     def mounted_inverted(self) -> bool:
         """Whether the gimbal hangs upside down, so it reports pitch 180 away from 0x0E's.
@@ -882,7 +940,7 @@ class CameraState:
         return {
             "time": time.time(), "monotonic": now, "server_started": SERVER_STARTED,
             "python": sys.version.split()[0], "platform": platform.platform(),
-            "git": git_revision(), "camera_ip": self.ip, "connected": self.is_connected,
+            "git": self.git_rev, "camera_ip": self.ip, "connected": self.is_connected,
             "firmware_version": dataclasses.asdict(self.firmware_version) if self.firmware_version else None,
             "lock_control": self.pointing.lock_control,
             "link": None if link is None else {
@@ -956,9 +1014,11 @@ class CameraState:
             "error_deg": [round(v, 2) for v in s.error_deg], "command": list(s.command),
             "update_ms": self.lock_ms, "compensated": s.compensated, "control": lock.control,
             "target_rate_deg_s": [round(v, 1) for v in s.target_rate_deg_s],
+            "turn_scale": [round(v, 3) for v in s.turn_scale], "gain_scale": round(s.gain_scale, 3),
         }
         if isinstance(lock, FirmwarePointLock):
-            snapshot.update(error_deg=None, command=None, compensated=None, target_rate_deg_s=None)
+            snapshot.update(error_deg=None, command=None, compensated=None, target_rate_deg_s=None,
+                            turn_scale=None, gain_scale=None)
         return snapshot
 
     async def calibrate(self) -> dict:
@@ -969,6 +1029,9 @@ class CameraState:
             raise HTTPException(status_code=409, detail="A measurement is already running")
         await self.release_lock("Point lock released for loop measurement")
         client = self.client
+        # The field-of-view fit divides by the zoom; a stale zoom made it report 104.6 deg
+        # (the A8 Mini's lens is about 81).
+        await self.refresh_zoom()
         self.calibrating = True
         try:
             result = await calibrate_loop(
@@ -998,11 +1061,18 @@ class CameraState:
         cfg.command_delay_ms = round(model.command_delay_s * 1000, 1)
         cfg.frame_delay_ms = round(model.video_delay_s * 1000, 1)
         cfg.motor_tau_ms = round(model.motor_tau_s * 1000, 1)
+        cfg.deadzone_yaw, cfg.deadzone_pitch = (round(v, 2) for v in model.deadzone_units)
+        cfg.min_units_yaw, cfg.min_units_pitch = model.min_units
         cfg.yaw_sign, cfg.pitch_sign = result.attitude_signs
-        cfg.hfov_deg = round(result.hfov_deg, 1)
+        notes = list(result.notes)
+        if 60.0 <= result.hfov_deg <= 100.0:
+            cfg.hfov_deg = round(result.hfov_deg, 1)
+        else:
+            notes.append(f"measured field of view {result.hfov_deg:.1f} deg is implausible for the "
+                         f"A8 Mini (about 81); kept {cfg.hfov_deg}. Check the zoom reads 1x.")
         cfg.calibrated = True
         self.store_mount_profile()
-        return {"config": vars(cfg), "notes": result.notes,
+        return {"config": vars(cfg), "notes": notes,
                 "fit_error_deg": round(result.yaw.fit_error_deg, 2)}
 
     async def refresh_zoom(self):
@@ -1256,6 +1326,10 @@ class PointingConfigRequest(BaseModel):
     command_delay_ms: float = Field(default=60.0, ge=0, le=1000)
     frame_delay_ms: float = Field(default=200.0, ge=0, le=2000)
     motor_tau_ms: float = Field(default=0.0, ge=0, le=500)
+    deadzone_yaw: float = Field(default=0.0, ge=0, le=20)
+    deadzone_pitch: float = Field(default=0.0, ge=0, le=20)
+    min_units_yaw: float = Field(default=0.0, ge=0, le=30)
+    min_units_pitch: float = Field(default=0.0, ge=0, le=30)
     calibrated: bool = False
     mount_profiles: dict[Literal["normal", "inverted"], dict[str, float]] = Field(default_factory=dict)
 
@@ -1372,6 +1446,16 @@ async def track_lock(req: LockRequest):
 async def track_calibrate():
     """Turn the gimbal briefly on each axis to measure the loop (moves the camera)."""
     return await state.calibrate()
+
+@app.get("/api/track/learned")
+async def track_learned():
+    """Turn rate and command delay learned while locked, against the calibration."""
+    return state.learned_loop()
+
+@app.post("/api/track/learned/apply")
+async def track_learned_apply():
+    """Store the learned turn rate and command delay as the calibration."""
+    return await state.apply_learned_loop()
 
 @app.post("/api/track/release")
 async def track_release():
@@ -1697,12 +1781,22 @@ async def debug_frames(since: int = 0):
 
 @app.get("/api/debug/tracking")
 async def debug_tracking(since: int = 0):
-    return state.trace_records(since)
+    # Thousands of records: copy the logs here (fast), but filter, sort and encode them in a
+    # thread. FastAPI's own encoder walked them on the event loop, stalling it for up to
+    # 860 ms, during which point lock commands stopped.
+    tracking, video = list(state.tracking_log), list(state.video_log)
+
+    def encode() -> bytes:
+        records = sorted((r for r in (*tracking, *video) if r["id"] > since), key=lambda r: r["id"])
+        return json.dumps(records, default=str).encode()
+
+    return Response(content=await asyncio.to_thread(encode), media_type="application/json")
 
 @app.get("/api/debug/diagnostics")
 async def debug_diagnostics():
     # The Wi-Fi reading is fresh at export time, not up to 15 s old.
     state.wifi = await asyncio.to_thread(wifi_info) or state.wifi
+    state.git_rev = await asyncio.to_thread(git_revision)
     return state.diagnostics()
 
 @app.websocket("/ws/attitude")

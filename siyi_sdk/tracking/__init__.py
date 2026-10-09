@@ -20,7 +20,13 @@ from importlib import import_module
 from typing import Any
 
 from siyi_sdk.tracking.attitude import AttitudeHistory
-from siyi_sdk.tracking.control import LockGains, LoopModel, RateController, pixel_error_deg
+from siyi_sdk.tracking.control import (
+    LockGains,
+    LoopModel,
+    RateController,
+    TurnRateEstimator,
+    pixel_error_deg,
+)
 from siyi_sdk.tracking.metrics import LockMetrics
 
 _LAZY = {
@@ -68,6 +74,7 @@ __all__ = [
     "PointLock",
     "PointModel",
     "RateController",
+    "TurnRateEstimator",
     "calibrate_loop",
     "pixel_error_deg",
 ]

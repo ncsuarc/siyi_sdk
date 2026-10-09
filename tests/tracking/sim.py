@@ -48,6 +48,8 @@ class SimConfig:
     drift_deg_s: tuple[float, float] = (0.0, 0.0)
     angle_bandwidth: float = 12.0  # 1/s, the gimbal's own position loop
     max_rate: float = 150.0
+    # 0x07 units the motor ignores; above it the rate is deg_per_unit * (units - deadzone).
+    deadzone_units: float = 0.0
     # Where a ground spot has moved across the sky by time t (image-aligned degrees);
     # overrides drift_deg_s. Models sudden target motion and the rig being swung.
     motion: Callable[[float], tuple[float, float]] | None = None
@@ -142,9 +144,10 @@ class SimGimbal:
                 _, mode, value = self.pending.popleft()
                 self.mode = mode
                 if mode == "rate":
-                    self.command_target = (
-                        value[0] * self.cfg.deg_per_unit,
-                        value[1] * self.cfg.deg_per_unit,
+                    dz = self.cfg.deadzone_units
+                    self.command_target = tuple(  # type: ignore[assignment]
+                        math.copysign(max(abs(u) - dz, 0.0), u) * self.cfg.deg_per_unit
+                        for u in value
                     )
                 else:
                     self.angle_target = value

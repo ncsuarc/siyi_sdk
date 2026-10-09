@@ -48,6 +48,12 @@ class PointingConfig:
     # The part of the command delay that is the motor getting up to speed; 0 = not measured
     # (then the rate lock can't predict the commands in flight and uses a lower gain).
     motor_tau_ms: float = 0.0
+    # 0x07 speeds the motor ignores (measured with a slow turn); 0 = not measured.
+    deadzone_yaw: float = 0.0
+    deadzone_pitch: float = 0.0
+    # Slowest 0x07 speed the motor obeys at all (smaller ones are ignored); 0 = not measured.
+    min_units_yaw: float = 0.0
+    min_units_pitch: float = 0.0
     calibrated: bool = False
     # Measured axis directions per mounting ("normal"/"inverted"): flipping the camera
     # changes how image motion maps to reported attitude, so each needs its own.

@@ -13,6 +13,7 @@ pytest.importorskip("cv2")
 from siyi_sdk.tracking import (
     FrameMotionRecorder,
     GimbalPointLock,
+    LockGains,
     LoopModel,
     calibrate_loop,
 )
@@ -120,3 +121,45 @@ async def test_calibration_recovers_the_simulated_gimbal(ground):
     assert result.attitude_signs == (-1, -1)
     assert result.hfov_deg == pytest.approx(80.0, abs=2.5)  # corrected from a wrong 74
     assert not result.notes
+
+
+async def test_wrong_turn_rate_is_learned_while_locked(ground):
+    # Calibrated on a full battery; the gimbal now turns 35% slower than the model says.
+    cfg = SimConfig(drift_deg_s=(8.0, -3.0), deg_per_unit=0.8)
+    async with SimGimbal(ground, cfg) as sim:
+        loop = model_of(cfg)
+        loop.deg_per_unit = (0.8 / 0.65, 0.8 / 0.65)
+        loop.motor_tau_s = cfg.motor_tau
+        lock = GimbalPointLock(
+            send=sim.rotate,
+            hfov_deg=80,
+            loop=loop,
+            attitude=sim.history,
+            trust_video_delay=True,
+        )
+        trace = await hold(sim, lock, 4.0)
+    assert lock.turn_rate is not None
+    assert lock.turn_rate.scale == pytest.approx([0.65, 0.65], abs=0.08)
+    assert statistics.median(e for t, e in trace if t > 3.0) < 0.5
+
+
+async def test_too_high_gain_is_backed_off_while_locked(ground):
+    # Gains for a loop four times faster than the real one: it rings until the guard acts.
+    cfg = SimConfig(drift_deg_s=(4.0, 0.0))
+    async with SimGimbal(ground, cfg) as sim:
+        loop = model_of(cfg)
+        gains = LockGains.for_model(loop, compensated=True)
+        gains.kp *= 4
+        gains.ki *= 16
+        lock = GimbalPointLock(
+            send=sim.rotate,
+            hfov_deg=80,
+            loop=loop,
+            gains=gains,
+            attitude=sim.history,
+            trust_video_delay=True,
+            smith=False,
+        )
+        trace = await hold(sim, lock, 6.0)
+    assert lock.controller.guard.backoffs >= 1
+    assert statistics.median(e for t, e in trace if t > 4.5) < 0.8

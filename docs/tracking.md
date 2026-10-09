@@ -67,6 +67,8 @@ The video delay matters most. If it is set too long, the attitude paired with ea
 - While locked, the lock re-estimates the video delay every few frames: it tries delays around the current one and keeps the one under which the spot's direction is most nearly a straight line in time. This only happens when the gimbal has turned enough to tell delays apart.
 - Until that estimate has confirmed the delay, a 20% shorter delay is used, because too short only slows the loop. Pass `trust_video_delay=True` when the delay was measured.
 - The spot's estimated velocity is limited to 30 degrees per second.
+- With speed commands (`control="rate"`), the lock also learns the turn rate and the command dead time (`TurnRateEstimator`): over 0.2 s windows it compares how far the attitude stream shows the gimbal turning with how far the calibrated model predicts, and corrects `deg_per_unit` by the ratio (0.5x to 2x). Windows with too little commanded motion, full-speed commands, or turns far from the prediction (aircraft yaw, a hand on the rig) are ignored. The dead time is refined like the video delay, within 0.5x to 1.5x of the measured one. Pass the same `turn_rate` estimator to the next `GimbalPointLock` to continue learning; `lock.adapt_turn_rate = False` turns it off.
+- If the error keeps swinging past +-0.5 degrees (four swings within 3 s), the controller's `OscillationGuard` cuts the gain to 70% (down to 30% at most) and restores it slowly after 4 s of calm. `LockStatus.turn_scale` and `gain_scale` show both adaptations.
 
 A 25% error in the turn rate costs little: angle mode doesn't use it, and the rate loop's integral absorbs it.
 

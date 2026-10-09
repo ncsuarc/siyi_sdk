@@ -6,17 +6,25 @@
     <title>SIYI A8 Mini</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
     <header>
-        <div class="logo">SIYI COMMAND</div>
+        <div class="logo">SIYI A8 Mini <span class="logo-sub">Test console</span></div>
         <div class="status-bar">
             <div class="status-item">
                 <span id="connection-indicator" class="indicator"></span>
                 <span id="camera-status">CHECKING...</span>
+            </div>
+            <div class="status-item" title="Camera reply round-trip time">
+                <span class="status-key">RTT</span>
+                <span id="header-rtt">&mdash;</span>
+            </div>
+            <div class="status-item" title="Time since the server received a decoded video frame">
+                <span class="status-key">Frame</span>
+                <span id="header-frame">&mdash;</span>
             </div>
             <div class="status-item">
                 <i class="fas fa-microchip"></i>
@@ -39,31 +47,16 @@
                 <div><span class="state-label">Status source</span><strong id="state-freshness">Waiting for camera</strong></div>
             </section>
             <div class="video-toolbar">
-                <label class="toggle">
-                    <input type="checkbox" id="config-live-view-toggle" checked>
-                    Live View
-                </label>
-                <label class="toggle" title="Click the video to aim there, drag to pan, scroll to zoom toward the cursor">
+                <label class="toggle" title="Click the video to aim there, drag to pan, scroll to turn, pinch to zoom">
                     <input type="checkbox" id="pointer-control-toggle" checked>
                     Point and drag
                 </label>
-                <label class="toolbar-select">
-                    Click video to
-                    <select id="click-action-select">
-                        <option value="aim">Aim there</option>
-                        <option value="lock">Lock on spot</option>
-                    </select>
-                </label>
+                <div class="segmented" role="group" aria-label="Click video to">
+                    <span class="segmented-label">Click to</span>
+                    <button class="btn btn-sm" type="button" id="click-aim-btn" aria-pressed="true">Aim</button>
+                    <button class="btn btn-sm" type="button" id="click-lock-btn" aria-pressed="false">Lock on spot</button>
+                </div>
                 <button class="btn btn-sm" id="release-lock-btn" hidden><i class="fas fa-unlock"></i> Release lock</button>
-                <label class="toolbar-select">
-                    Video backend
-                    <select id="stream-backend-select">
-                        <option value="auto">Auto</option>
-                        <option value="opencv">OpenCV</option>
-                        <option value="gstreamer">GStreamer</option>
-                        <option value="aiortsp">aiortsp</option>
-                    </select>
-                </label>
             </div>
             <div class="video-container">
                 <img id="video-stream" alt="Video Stream" hidden>
@@ -125,11 +118,6 @@
                         <button class="btn" id="fpv-btn" aria-pressed="false">FPV</button>
                     </div>
                     <p id="mode-description" class="control-hint">The selected mode comes from the camera.</p>
-                    <div class="joystick-container">
-                        <div id="joystick-zone" class="virtual-joystick">
-                            <div id="joystick-handle" class="joystick-handle"></div>
-                        </div>
-                    </div>
                     <div class="grid-controls">
                         <button class="btn" id="center-btn"><i class="fas fa-compress-arrows-alt"></i> Center</button>
                         <button class="btn" id="stop-btn"><i class="fas fa-stop"></i> Stop motion</button>
@@ -151,10 +139,13 @@
                     <kbd>C</kbd> center · <kbd>+</kbd>/<kbd>-</kbd> zoom (hold)
                 </p>
                 <p class="control-hint shortcut-hint">
+                    Trackpad over the video: two-finger scroll turns the gimbal · pinch or mouse wheel zooms
+                </p>
+                <p class="control-hint shortcut-hint">
                     Video (Point and drag on): click to aim there · drag to pan the scene · scroll to zoom toward the cursor
                 </p>
                 <p class="control-hint shortcut-hint">
-                    Point lock (Click video to: Lock on spot): click a spot to keep the gimbal on it while the drone moves · scroll zooms without losing the lock · <kbd>Esc</kbd>, Stop, the joystick, or dragging releases it
+                    Point lock (Click video to: Lock on spot): click a spot to keep the gimbal on it while the drone moves · scroll zooms without losing the lock · <kbd>Esc</kbd>, Stop, a key press, or dragging releases it
                 </p>
             </section>
 
@@ -324,41 +315,67 @@
                 <h2>Configuration</h2>
                 <button class="btn btn-icon" id="close-config-btn" aria-label="Close"><i class="fas fa-times"></i></button>
             </div>
-            <div class="input-group">
-                <label for="config-ip-input">Camera IP Address</label>
-                <input type="text" id="config-ip-input" placeholder="192.168.144.25">
-            </div>
-            <div class="input-group">
-                <label for="config-res-select">Live view resolution</label>
-                <select id="config-res-select">
-                    <option value="">Keep current resolution</option>
-                    <option value="1920x1080">1080P</option>
-                    <option value="1280x720">720P</option>
-                </select>
-            </div>
-            <div class="input-group">
-                <label for="config-rec-res-select">Recording resolution (also limits zoom: 720p 6×, 1080p 5.5×, 1440p 3.5×, 4K none)</label>
-                <select id="config-rec-res-select">
-                    <option value="">Keep current resolution</option>
-                    <option value="3840x2160">4K (no zoom)</option>
-                    <option value="2560x1440">1440P</option>
-                    <option value="1920x1080">1080P</option>
-                    <option value="1280x720">720P</option>
-                </select>
-            </div>
+            <section class="config-section" aria-labelledby="cfg-camera">
+                <h3 id="cfg-camera">Camera</h3>
+                <div class="input-group">
+                    <label for="config-ip-input">IP address</label>
+                    <input type="text" id="config-ip-input" placeholder="192.168.144.25">
+                </div>
+                <div class="field-row">
+                    <div class="input-group">
+                        <label for="config-res-select">Live view resolution</label>
+                        <select id="config-res-select">
+                            <option value="">Keep current</option>
+                            <option value="1920x1080">1080P</option>
+                            <option value="1280x720">720P</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label for="config-rec-res-select">Recording resolution</label>
+                        <select id="config-rec-res-select">
+                            <option value="">Keep current</option>
+                            <option value="3840x2160">4K (no zoom)</option>
+                            <option value="2560x1440">1440P</option>
+                            <option value="1920x1080">1080P</option>
+                            <option value="1280x720">720P</option>
+                        </select>
+                    </div>
+                </div>
+                <p class="control-hint">Recording resolution also limits zoom: 720p 6&times;, 1080p 5.5&times;, 1440p 3.5&times;, 4K none.</p>
+            </section>
 
-            <fieldset class="pointing-settings">
-                <legend>Point and drag</legend>
+            <section class="config-section" aria-labelledby="cfg-video">
+                <h3 id="cfg-video">Video</h3>
                 <div class="input-group">
-                    <label for="pointing-hfov-input">Horizontal field of view at 1× (degrees)</label>
-                    <input type="number" id="pointing-hfov-input" min="10" max="160" step="0.5" value="81">
+                    <label class="toggle"><input type="checkbox" id="config-live-view-toggle" checked> Live view</label>
                 </div>
                 <div class="input-group">
-                    <label for="pointing-delay-input">Video delay (ms)</label>
-                    <input type="number" id="pointing-delay-input" min="0" max="3000" step="10" value="200">
+                    <label for="stream-backend-select">Backend</label>
+                    <select id="stream-backend-select">
+                        <option value="auto">Auto</option>
+                        <option value="opencv">OpenCV</option>
+                        <option value="gstreamer">GStreamer</option>
+                        <option value="aiortsp">aiortsp</option>
+                    </select>
                 </div>
-                <label class="toggle"><input type="checkbox" id="pointing-invert-yaw"> Invert yaw</label>
-                <label class="toggle"><input type="checkbox" id="pointing-invert-pitch"> Invert pitch</label>
+            </section>
+
+            <section class="config-section pointing-settings" aria-labelledby="cfg-pointing">
+                <h3 id="cfg-pointing">Pointing and lock</h3>
+                <div class="field-row">
+                    <div class="input-group">
+                        <label for="pointing-hfov-input">Field of view at 1&times;</label>
+                        <span class="input-unit"><input type="number" id="pointing-hfov-input" min="10" max="160" step="0.5" value="81"><span class="unit">&deg;</span></span>
+                    </div>
+                    <div class="input-group">
+                        <label for="pointing-delay-input">Video delay</label>
+                        <span class="input-unit"><input type="number" id="pointing-delay-input" min="0" max="3000" step="10" value="200"><span class="unit">ms</span></span>
+                    </div>
+                </div>
+                <div class="toggle-row">
+                    <label class="toggle"><input type="checkbox" id="pointing-invert-yaw"> Invert yaw</label>
+                    <label class="toggle"><input type="checkbox" id="pointing-invert-pitch"> Invert pitch</label>
+                </div>
                 <div class="input-group">
                     <label for="lock-control-select">Point lock steering</label>
                     <select id="lock-control-select">
@@ -369,33 +386,43 @@
                     <p id="firmware-lock-hint" class="control-hint" hidden>Fixed scene point; releases immediately if tracking is lost or the point leaves the screen. Manual zoom stays available. If it overshoots, lower the response (e.g. 0.5); values above 1 act as 1. Experimental on A8 Mini camera 0.3.7 / gimbal 0.4.9; hardware validation pending.</p>
                 </div>
                 <div class="input-group">
-                    <label for="lock-response-input">Point lock response (1 = default, higher = more aggressive)</label>
-                    <input type="number" id="lock-response-input" min="0.2" max="5" step="0.1" value="1">
-                </div>
-                <div class="input-group">
-                    <label for="lock-speed-input">Point lock top speed, speed commands only (5-100)</label>
-                    <input type="number" id="lock-speed-input" min="5" max="100" step="5" value="100">
-                </div>
-                <div class="input-group">
-                    <label for="lock-model-select">Point lock target distance</label>
-                    <select id="lock-model-select">
-                        <option value="local">Ground target (default)</option>
-                        <option value="global">Distant target near the horizon</option>
-                    </select>
-                </div>
-                <div class="input-group">
-                    <label><input type="checkbox" id="lock-debug-toggle"> Show tracking debug on the video</label>
+                    <label class="toggle"><input type="checkbox" id="lock-debug-toggle"> Show tracking debug on the video</label>
                     <p class="control-hint">While a point is locked, draws every tracked feature: blue and green agree with the camera's motion, red are ignored as moving objects, and the bar is the score that releases the lock when it falls below the mark. Applies at once.</p>
                 </div>
                 <div class="calibration">
                     <button class="btn btn-block" id="calibrate-loop-btn" type="button"><i class="fas fa-stopwatch"></i> Measure loop timing</button>
-                    <p id="calibration-status" class="control-hint" role="status" aria-live="polite">Not measured yet. Point the camera at a textured, still scene, then measure: the gimbal turns about 20° on each axis and back.</p>
+                    <p id="calibration-status" class="control-hint" role="status" aria-live="polite">Not measured yet. Point the camera at a textured, still scene, then measure: the gimbal turns about 20&deg; on each axis and back.</p>
+                    <button class="btn btn-block" id="apply-learned-btn" type="button"><i class="fas fa-floppy-disk"></i> Save what locks learned</button>
+                    <p id="learned-status" class="control-hint" role="status" aria-live="polite">While locked, the speed loop learns the real turn rate and command delay (battery, payload, mount). Saving makes them the measured values.</p>
                 </div>
                 <p class="control-hint">Measuring sets the turn rate, delays, axis directions and field of view for you. If a click still overshoots, lower the field of view; if it falls short, raise it. If a point lock oscillates around the spot, lower the response; if it lags behind, raise it.</p>
-            </fieldset>
+
+                <details class="config-advanced">
+                    <summary>Advanced lock tuning</summary>
+                    <div class="field-row">
+                        <div class="input-group">
+                            <label for="lock-response-input">Response</label>
+                            <span class="input-unit"><input type="number" id="lock-response-input" min="0.2" max="5" step="0.1" value="1"><span class="unit">&times;</span></span>
+                            <p class="control-hint">0.2&ndash;5. 1 is the default; higher is more aggressive.</p>
+                        </div>
+                        <div class="input-group">
+                            <label for="lock-speed-input">Top speed</label>
+                            <span class="input-unit"><input type="number" id="lock-speed-input" min="5" max="100" step="5" value="100"><span class="unit">%</span></span>
+                            <p class="control-hint">5&ndash;100. Speed commands only.</p>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label for="lock-model-select">Target distance</label>
+                        <select id="lock-model-select">
+                            <option value="local">Ground target (default)</option>
+                            <option value="global">Distant target near the horizon</option>
+                        </select>
+                    </div>
+                </details>
+            </section>
 
             <div class="danger-zone">
-                <span class="danger-label">DANGER ZONE</span>
+                <span class="danger-label">Danger zone</span>
                 <div class="grid-controls">
                     <button class="btn btn-danger btn-compact" id="reboot-camera-btn">
                         <i class="fas fa-power-off"></i> Reboot Cam

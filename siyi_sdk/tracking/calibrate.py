@@ -252,6 +252,41 @@ async def measure_axis(
     return AxisResult(slope / speed, max(0.0, onset - t_command), lag, scale, rms, tau)
 
 
+async def measure_threshold(
+    send: SendRate,
+    attitude: AttitudeHistory,
+    *,
+    axis: str,
+    deg_per_unit: float,
+    speeds: tuple[int, ...] = (2, 3, 4, 5, 6, 7, 8, 10),
+    hold_s: float = 0.4,
+) -> float:
+    """Find the slowest 0x07 speed that turns ``axis`` at all; 0 if the slowest tried does.
+
+    The A8 Mini ignores small speeds outright (a threshold, not an offset of the speed
+    line), which a fit through two faster speeds can't see. Each speed is held briefly,
+    then reversed so the gimbal ends where it started. ``deg_per_unit`` is the rate
+    measured at a normal speed (attitude terms, any sign).
+    """
+    index = 0 if axis == "yaw" else 1
+    for speed in speeds:
+        command = (speed, 0) if index == 0 else (0, speed)
+        start = time.monotonic()
+        await _turn(send, *command, hold_s)
+        end = time.monotonic()
+        samples = [s for s in attitude.samples if start + hold_s / 2 <= s[0] <= end + 0.05]
+        moved = False
+        if len(samples) >= 3:
+            rate = (samples[-1][1 + index] - samples[0][1 + index]) / (samples[-1][0] - samples[0][0])
+            moved = abs(rate) >= 0.5 * abs(deg_per_unit) * speed
+        await asyncio.sleep(0.2)
+        if moved:
+            await _turn(send, -command[0], -command[1], hold_s)  # undo the nudge
+            await asyncio.sleep(0.2)
+            return 0.0 if speed == speeds[0] else float(speed)
+    return float(speeds[-1])
+
+
 async def calibrate_loop(
     send: SendRate,
     attitude: AttitudeHistory,
@@ -262,12 +297,17 @@ async def calibrate_loop(
     speed: int = 25,
     move_s: float = 0.8,
     pitch: bool = True,
+    low_speed: int | None = 10,
 ) -> LoopCalibration:
     """Measure both axes and return a :class:`LoopModel` plus signs and field of view.
 
     Needs the attitude stream running (50-100 Hz is best) into ``attitude``,
     and every decoded frame passed to ``recorder.add``. Point the camera at a
     textured, static scene; plain sky or water gives no picture motion.
+
+    With ``low_speed``, each axis also turns at that slower speed. The two turn rates
+    give the motor's dead zone (the slow speeds it ignores) and its true rate per unit
+    above it; one speed alone can't tell them apart.
     """
     yaw = await measure_axis(
         send,
@@ -302,17 +342,52 @@ async def calibrate_loop(
     else:
         notes.append(f"picture/attitude scale {k:.2f} is implausible; field of view left unchanged")
     results = [r for r in (yaw, pitch_result) if r is not None]
+    per_unit = {"yaw": yaw.deg_per_unit_attitude, "pitch": None}
+    deadzone = {"yaw": 0.0, "pitch": 0.0}
+    if pitch_result is not None:
+        per_unit["pitch"] = pitch_result.deg_per_unit_attitude
+    for name, fast in (("yaw", yaw), ("pitch", pitch_result)):
+        if fast is None or not low_speed or low_speed >= speed:
+            continue
+        try:
+            slow = await measure_axis(
+                send, attitude, recorder, axis=name, hfov_deg=hfov_deg, zoom=zoom,
+                speed=low_speed, move_s=move_s,
+            )
+        except CalibrationError as exc:
+            notes.append(f"{name}: slow turn failed ({exc}); dead zone not measured")
+            continue
+        fast_rate = fast.deg_per_unit_attitude * speed
+        slow_rate = slow.deg_per_unit_attitude * low_speed
+        slope = (fast_rate - slow_rate) / (speed - low_speed)
+        if slope * fast_rate <= 0 or abs(slow_rate) > abs(fast_rate):
+            notes.append(f"{name}: slow and fast turns disagree; dead zone not measured")
+            continue
+        zone = low_speed - slow_rate / slope
+        deadzone[name] = float(min(max(zone, 0.0), low_speed - 1))
+        per_unit[name] = fast_rate / (speed - deadzone[name])
+    threshold = {"yaw": 0.0, "pitch": 0.0}
+    for name, fast in (("yaw", yaw), ("pitch", pitch_result)):
+        if fast is not None and low_speed:
+            threshold[name] = await measure_threshold(
+                send, attitude, axis=name, deg_per_unit=fast.deg_per_unit_attitude
+            )
+    yaw_rate = per_unit["yaw"] * yaw_sign
+    pitch_rate = per_unit["pitch"] * pitch_sign if per_unit["pitch"] is not None else yaw_rate
     model = LoopModel(
         # The controller works in image-aligned terms, so fold the attitude sign in.
-        deg_per_unit=(
-            yaw.deg_per_unit_attitude * yaw_sign,
-            (pitch_result.deg_per_unit_attitude * pitch_sign)
-            if pitch_result
-            else yaw.deg_per_unit_attitude * yaw_sign,
-        ),
+        deg_per_unit=(yaw_rate, pitch_rate),
         command_delay_s=float(np.median([r.command_delay_s for r in results])),
         video_delay_s=float(np.median([r.video_delay_s for r in results])),
         motor_tau_s=float(np.median([r.motor_tau_s for r in results])),
+        deadzone_units=(
+            deadzone["yaw"],
+            deadzone["pitch"] if pitch_result is not None else deadzone["yaw"],
+        ),
+        min_units=(
+            threshold["yaw"],
+            threshold["pitch"] if pitch_result is not None else threshold["yaw"],
+        ),
     )
     for r, name in ((yaw, "yaw"), (pitch_result, "pitch")):
         if r is not None and r.fit_error_deg > 0.5:

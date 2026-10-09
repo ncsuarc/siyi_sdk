@@ -42,7 +42,6 @@ window.confirmAction = (message, {title = 'Are you sure?', confirmLabel = 'Confi
 class SiyiApp {
     constructor() {
         this.ws = null;
-        this.joystickActive = false;
         this.currentPath = "";
         this.currentMediaMode = 0; // 0: Images, 1: Videos
         this.liveViewEnabled = true;
@@ -77,7 +76,6 @@ class SiyiApp {
             this.setupTabs();
             this.setupPlots();
             this.bindEvents();
-            this.setupJoystick();
             this.setupPointer();
             this.setupKeyboard();
             this.loadPointingConfig();
@@ -308,7 +306,6 @@ class SiyiApp {
         }
         document.getElementById('config-res-select').disabled = !connected;
         document.getElementById('config-rec-res-select').disabled = !connected;
-        document.getElementById('joystick-zone').setAttribute('aria-disabled', String(!connected));
         if (!connected) {
             this.stopMotion();
             this.renderCameraState(null);
@@ -495,7 +492,7 @@ class SiyiApp {
                     '/api/camera/photo': 'Photo', '/api/camera/zoom': 'Zoom velocity',
                     '/api/camera/encoding': 'Encoding settings', '/api/gimbal/look': 'Point',
                     '/api/track/lock': 'Point lock', '/api/track/release': 'Release lock',
-                    '/api/track/calibrate': 'Measure loop timing',
+                    '/api/track/calibrate': 'Measure loop timing', '/api/track/learned/apply': 'Save learned loop',
                     '/api/camera/zoom_to': 'Zoom to'
                 };
                 let suffix = '';
@@ -654,6 +651,8 @@ class SiyiApp {
             const failure = document.getElementById('latency-failure');
             failure.hidden = !metrics.last_failure;
             failure.textContent = metrics.last_failure ? `Last failed query: ${metrics.last_failure}` : '';
+            document.getElementById('header-rtt').textContent = fresh ? ms(metrics.camera_rtt_ms) : '—';
+            document.getElementById('header-frame').textContent = ms(metrics.frame_age_ms);
             document.getElementById('latency-video').textContent = `${ms(metrics.jpeg_ms)} / ${ms(metrics.frame_age_ms)}`;
             document.getElementById('latency-attitude').textContent = ms(metrics.attitude_age_ms);
             document.getElementById('latency-samples').textContent = `${metrics.samples} successful samples · rolling window of 100 queries. Failed queries are excluded from p50 / p95. Movement is sent without ACK waits; sent does not mean confirmed.`;
@@ -761,68 +760,6 @@ class SiyiApp {
         for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) button.addEventListener(name, stop);
     }
 
-    setupJoystick() {
-        const zone = document.getElementById('joystick-zone');
-        const handle = document.getElementById('joystick-handle');
-        let moveInterval = null;
-        let lastVel = {yaw: 0, pitch: 0};
-        let pointerId = null;
-
-        const handleMove = (e) => {
-            if (!this.joystickActive) return;
-            
-            if (e.pointerId !== pointerId) return;
-            const rect = zone.getBoundingClientRect();
-            let dx = e.clientX - rect.left - rect.width / 2;
-            let dy = e.clientY - rect.top - rect.height / 2;
-            
-            const dist = Math.min(60, Math.sqrt(dx*dx + dy*dy));
-            const angle = Math.atan2(dy, dx);
-            
-            const posX = Math.cos(angle) * dist;
-            const posY = Math.sin(angle) * dist;
-            
-            handle.style.left = `calc(50% + ${posX}px)`;
-            handle.style.top = `calc(50% + ${posY}px)`;
-            
-            // Normalize velocity to -100 to 100
-            lastVel = {
-                yaw: Math.round((posX / 60) * 100),
-                pitch: Math.round(-(posY / 60) * 100)
-            };
-            if (dist < 5) lastVel = {yaw: 0, pitch: 0};
-        };
-
-        const startMove = (e) => {
-            if (!this.isCameraConnected || this.joystickActive || e.button !== 0) return;
-            e.preventDefault();
-            pointerId = e.pointerId;
-            zone.setPointerCapture(pointerId);
-            this.joystickActive = true;
-            handleMove(e);
-            this.queueMotion('rotate', lastVel);
-            moveInterval = setInterval(() => this.queueMotion('rotate', lastVel), 50);
-        };
-
-        const stopMove = () => {
-            if (!this.joystickActive) return;
-            this.joystickActive = false;
-            clearInterval(moveInterval);
-            handle.style.left = '50%';
-            handle.style.top = '50%';
-            lastVel = {yaw: 0, pitch: 0};
-            this.queueMotion('rotate', lastVel);
-            const releasedPointer = pointerId;
-            pointerId = null;
-            if (zone.hasPointerCapture(releasedPointer)) zone.releasePointerCapture(releasedPointer);
-        };
-
-        this.stopHandlers.push(stopMove);
-        zone.addEventListener('pointerdown', startMove);
-        zone.addEventListener('pointermove', handleMove);
-        for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) zone.addEventListener(name, stopMove);
-    }
-
     setupPointer() {
         // Point-and-drag control on the video: the server turns screen
         // positions into absolute gimbal angles (see web_ui/pointing.py).
@@ -836,12 +773,25 @@ class SiyiApp {
         video.draggable = false;
         video.addEventListener('dragstart', event => event.preventDefault());
 
-        const clickAction = document.getElementById('click-action-select');
-        clickAction.value = store.get('clickAction') === 'lock' ? 'lock' : 'aim';
-        clickAction.addEventListener('change', () => store.set('clickAction', clickAction.value));
+        const clickAction = {value: store.get('clickAction') === 'lock' ? 'lock' : 'aim'};
+        const clickButtons = {aim: document.getElementById('click-aim-btn'), lock: document.getElementById('click-lock-btn')};
+        const syncClickAction = () => {
+            for (const [name, button] of Object.entries(clickButtons)) {
+                button.setAttribute('aria-pressed', String(clickAction.value === name));
+            }
+        };
+        for (const [name, button] of Object.entries(clickButtons)) {
+            button.addEventListener('click', () => {
+                clickAction.value = name;
+                store.set('clickAction', name);
+                syncClickAction();
+            });
+        }
+        syncClickAction();
         document.getElementById('release-lock-btn').addEventListener('click', () => this.releaseLock());
         this.initLockDebug();
         document.getElementById('calibrate-loop-btn').addEventListener('click', () => this.calibrateLoop());
+        document.getElementById('apply-learned-btn').addEventListener('click', () => this.applyLearnedLoop());
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape' && this.lockState !== 'idle' &&
                 !document.getElementById('config-modal').classList.contains('active')) {
@@ -906,10 +856,31 @@ class SiyiApp {
         };
         for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) video.addEventListener(name, endDrag);
 
+        // Trackpad: two-finger scroll turns the gimbal (speed follows the swipe),
+        // pinch (ctrl+wheel) and mouse-wheel notches zoom.
+        let scrollTimer = null;
+        const endScrollPan = () => {
+            if (scrollTimer === null) return;
+            clearTimeout(scrollTimer);
+            scrollTimer = null;
+            this.queueMotion('rotate', {yaw: 0, pitch: 0});
+        };
+        this.stopHandlers.push(endScrollPan);
+        const isTrackpadScroll = event => !event.ctrlKey && event.deltaMode === 0 &&
+            (event.deltaX !== 0 || Math.abs(event.deltaY) < 50 || event.deltaY % 100 !== 0);
+
         let wheel = null;
         video.addEventListener('wheel', event => {
             if (!enabled()) return;
             event.preventDefault();
+            if (isTrackpadScroll(event)) {
+                const slow = Math.sqrt(this.zoomLevel ?? 1);
+                const speed = value => clamp(Math.round(value * 2 / slow), -100, 100);
+                this.queueMotion('rotate', {yaw: speed(event.deltaX), pitch: speed(-event.deltaY)});
+                clearTimeout(scrollTimer);
+                scrollTimer = setTimeout(endScrollPan, 120);
+                return;
+            }
             const point = locate(event);
             const now = performance.now();
             // Wheel ticks within 400 ms form one gesture anchored where it began.
@@ -917,7 +888,7 @@ class SiyiApp {
                 wheel = {gesture: newGesture(), anchor: point, zoom: this.zoomLevel ?? 1};
             }
             wheel.time = now;
-            const steps = -event.deltaY / (event.deltaMode === 1 ? 3 : 100);
+            const steps = (event.ctrlKey ? -event.deltaY / 10 : -event.deltaY / (event.deltaMode === 1 ? 3 : 100));
             wheel.zoom = clamp(wheel.zoom * 1.15 ** steps, 1, this.zoomMax ?? 6);
             if (this.lockState !== 'idle') {
                 // Zoom in place; the lock keeps the spot centred and survives the scale change.
@@ -970,13 +941,24 @@ class SiyiApp {
             badge.textContent = lock.control === 'firmware'
                 ? `LOCK ${lock.score.toFixed(2)} · SIYI firmware (experimental)`
                 : state === 'locked'
-                ? `LOCK ${lock.score.toFixed(2)} · ${mode} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`
+                ? `LOCK ${lock.score.toFixed(2)} · ${mode} · off by ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}° / ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°` + this.lockAdaptation(lock)
                 : 'LOCK SEARCHING · holding still';
         }
         // The server drops a lock it can't recover or that manual control replaced.
         if (was !== 'idle' && state === 'idle' && !this.lockReleasing) {
             this.notify(lock.reason || 'Point lock ended: the spot was lost or another control took over.', true);
         }
+    }
+
+    /** What the speed loop has adapted, shown only once it differs from the calibration. */
+    lockAdaptation(lock) {
+        const parts = [];
+        const [yaw, pitch] = lock.turn_scale ?? [1, 1];
+        if (Math.abs(yaw - 1) >= 0.05 || Math.abs(pitch - 1) >= 0.05) {
+            parts.push(`turn rate ×${yaw.toFixed(2)} / ×${pitch.toFixed(2)}`);
+        }
+        if ((lock.gain_scale ?? 1) < 0.95) parts.push(`gain ×${lock.gain_scale.toFixed(2)} (ringing)`);
+        return parts.length ? ` · ${parts.join(' · ')}` : '';
     }
 
     queueZoom(zoom) {
@@ -1153,6 +1135,32 @@ class SiyiApp {
             this.notify(`Measurement failed: ${e.message}`, true);
         } finally {
             button.disabled = false;
+        }
+    }
+
+    async applyLearnedLoop() {
+        const status = document.getElementById('learned-status');
+        try {
+            const learned = await this.request('/api/track/learned', {}, {}, 3000);
+            if (!learned.ready) {
+                status.textContent = `Not enough learned yet (${learned.samples.join(' / ')} of 50 turns on yaw / pitch). ` +
+                    'Lock onto a moving spot, or pan while locked, then save.';
+                return;
+            }
+            const [ty, tp] = learned.turn_scale;
+            const confirmed = await confirmAction(
+                `Turn rate ×${ty.toFixed(2)} / ×${tp.toFixed(2)} (yaw / pitch) of the measured value, ` +
+                `command delay ${Math.round(learned.command_delay_ms)} ms. Save these as the measured values?`,
+                {title: 'Save what locks learned', confirmLabel: 'Save'});
+            if (!confirmed) return;
+            const result = await this.request('/api/track/learned/apply', {method: 'POST'}, {}, 3000);
+            store.set('pointingConfig', JSON.stringify(result.config));
+            this.showPointingConfig(result.config);
+            status.textContent = 'Saved. Locks start learning again from the new values.';
+            this.notify('Learned loop values saved.');
+        } catch (e) {
+            status.textContent = `Not saved: ${e.message}`;
+            this.notify(`Not saved: ${e.message}`, true);
         }
     }
 
