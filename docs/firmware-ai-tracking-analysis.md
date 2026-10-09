@@ -84,7 +84,21 @@ horizontal_error = x / 2 - 320
 vertical_error   = 180 - y / 2
 ```
 
-It calls the controller routine at `0x08014c54` for each axis. That routine contains proportional, accumulated-integral, and error-difference terms, plus limits: it is a PID-style controller. This finding identifies the structure, not a complete gain/timing specification.
+It calls the controller routine at `0x08014c54` for each axis. That routine contains proportional, accumulated-integral, and error-difference terms, plus limits: it is a PID-style controller.
+
+Further inspection recovered its **compiled initial values** by decoding the gimbal's compressed startup data. Startup routine `0x0800438c` reads a scatter entry at `0x080415a8`, which expands flash data at `0x080415c8` into 10,020 bytes of RAM starting at `0x20000000`, using decompressor `0x08004816`. The decoded stream ends exactly at `0x08041fcc`, the next scatter entry's source address.
+
+| Visual-tracking controller | RAM address | P | I per update | D | Integral clamp | Output clamp |
+| --- | --- | --- | --- | --- | --- | --- |
+| Vertical / pitch | `0x20001e18` | 3 | 0.05 | 0 | ±1500 | ±1600 |
+| Horizontal / yaw | `0x20001e98` | 3 | 0.05 | 0 | ±500 | ±1600 |
+| Target-size / zoom | `0x20001f18` | 5 | 0 | 0 | ±500 | ±500 |
+
+The controller arithmetic reads P at structure offset `0x24`, I at `0x28`, D at `0x2c`, integral limit at `0x20`, and output limit at `0x38`. All three default flag bytes at `0x64` equal `2`, enabling integral clamping. In this routine the integral updates as `integral += I * error`; there is no explicit elapsed-time multiplier. Thus these coefficients cannot be copied directly into a controller with different units or timing. With D zero, the two steering controllers operate as PI controllers with these defaults.
+
+The surrounding tracking code compares each stored axis reference against **±5 internal pixels** and sets it to zero inside that range; outside it, it subtracts a saved adjustment equal to the acquisition offset divided by **25**. This is reference shaping, not proof that all motor movement stops within five pixels. The size reference uses the mean of the halved width and height, clamped to **100–400**. The size controller's initial reference is **200**, which the tracking path subsequently replaces.
+
+These are the visual-tracking controller defaults in the inspected gimbal `0.4.9 svn10601`, not a complete inventory of its stabilization/motor controllers or a live-device read. Runtime parameter overrides and exact controller timing remain unverified. Evidence: [decoded controller values](../.tools/firmware-analysis/disassembly/a8-controller-initial-values.txt), [reproduction script](../.tools/firmware-analysis/extract_gimbal_controller_defaults.py), [complete controller arithmetic](../.tools/firmware-analysis/disassembly/a8-pid-full.txt), [extended tracking routine](../.tools/firmware-analysis/disassembly/a8-control-full.txt).
 
 The steering conversion routine at `0x0800e2a0` also reads these coordinates, camera orientation, and a zoom-like parameter clamped to 10–60. **Interpreting that parameter as tenths of 1×–6× zoom is an inference**, consistent with the camera's digital-zoom convention. It transforms controller outputs before calling the gimbal motion routine. Thus the path accounts for more than a raw pixel error.
 
