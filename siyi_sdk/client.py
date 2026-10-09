@@ -615,7 +615,6 @@ class SIYIClient:
     # A8 Mini digital zoom (0x05, 0x0F, 0x16, 0x18)
     # =========================================================================
 
-
     async def manual_zoom(self, direction: int) -> float:
         """Perform manual digital zoom on the A8 Mini.
 
@@ -636,12 +635,10 @@ class SIYIClient:
                 return await self.get_current_zoom()
             raise
 
-
     async def manual_zoom_nowait(self, direction: int) -> None:
         """Send continuous zoom velocity without waiting for an acknowledgment."""
         payload = commands.encode_manual_zoom(direction)
         await self._send_command(0x05, payload, expect_response=False)
-
 
     async def absolute_zoom(self, zoom: float) -> None:
         """Set an absolute digital zoom level on the A8 Mini.
@@ -890,7 +887,6 @@ class SIYIClient:
                 self._attitude_callbacks.remove(cb)
 
         return unsubscribe
-
 
     # =========================================================================
     # Camera (0x0A, 0x0B, 0x0C, 0x20, 0x21, 0x48, 0x49, 0x4A, 0x4B, 0x4C)

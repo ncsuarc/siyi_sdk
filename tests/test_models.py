@@ -19,7 +19,6 @@ from siyi_sdk import models
 class TestProductID:
     """Test ProductID enumeration."""
 
-
     def test_a8_mini(self):
         """A8_MINI should have value 0x73."""
         assert models.ProductID.A8_MINI == 0x73
@@ -238,7 +237,6 @@ class TestHardwareID:
         """HardwareID should have slots."""
         assert hasattr(models.HardwareID, "__slots__")
 
-
     def test_product_id_a8_mini(self):
         """product_id property should return ProductID for A8_MINI."""
         hw = models.HardwareID(raw=b"73" + b"\x00" * 10)
@@ -280,7 +278,6 @@ class TestAngleLimits:
         """ANGLE_LIMITS should have entry for every ProductID."""
         for product in models.ProductID:
             assert product in models.ANGLE_LIMITS, f"Missing {product.name}"
-
 
     def test_a8_mini_limits(self):
         """A8 Mini angle limits should match its documented control range."""

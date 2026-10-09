@@ -148,8 +148,12 @@ def _onset_and_rate(
 
 
 def _motor_lag(
-    times: NDArray[Any], values: NDArray[Any], t_command: float, t_stop: float,
-    onset: float, slope: float,
+    times: NDArray[Any],
+    values: NDArray[Any],
+    t_command: float,
+    t_stop: float,
+    onset: float,
+    slope: float,
 ) -> float:
     """Split the onset into dead time and a first-order motor lag; return the lag.
 
@@ -352,8 +356,14 @@ async def calibrate_loop(
             continue
         try:
             slow = await measure_axis(
-                send, attitude, recorder, axis=name, hfov_deg=hfov_deg, zoom=zoom,
-                speed=low_speed, move_s=move_s,
+                send,
+                attitude,
+                recorder,
+                axis=name,
+                hfov_deg=hfov_deg,
+                zoom=zoom,
+                speed=low_speed,
+                move_s=move_s,
             )
         except CalibrationError as exc:
             notes.append(f"{name}: slow turn failed ({exc}); dead zone not measured")

@@ -215,8 +215,7 @@ class GimbalPointLock:
             GimbalPredictor(self.loop.dead_time_s, self.loop.motor_tau_s) if smith else None
         )
         self.controller = RateController(
-            gains
-            or LockGains.for_model(self.loop, compensated=attitude is not None, smith=smith),
+            gains or LockGains.for_model(self.loop, compensated=attitude is not None, smith=smith),
             self.loop,
         )
         # Online turn-rate estimate (rate control with attitude): corrects the calibrated
@@ -385,7 +384,16 @@ class GimbalPointLock:
         await self._command(command)
         self.metrics.add(now, error, command)
         self.status = LockStatus(
-            LockState.LOCKED, x, y, width, height, score, error, command, on_screen, False,
+            LockState.LOCKED,
+            x,
+            y,
+            width,
+            height,
+            score,
+            error,
+            command,
+            on_screen,
+            False,
             gain_scale=self.controller.gain_scale,
         )
         return self.status

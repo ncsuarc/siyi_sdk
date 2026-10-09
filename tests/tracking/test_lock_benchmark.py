@@ -67,16 +67,27 @@ def model_of(cfg: SimConfig, *, error: float = 1.0) -> LoopModel:
 
 
 async def run_profile(
-    ground, name: str, seconds: float = 6.0, configure=None, *, smith: bool = True,
-    model_error: float = 1.0, **overrides,
+    ground,
+    name: str,
+    seconds: float = 6.0,
+    configure=None,
+    *,
+    smith: bool = True,
+    model_error: float = 1.0,
+    **overrides,
 ) -> dict:
     """Run one profile; ``configure(lock)`` may adjust the lock first (for tuning)."""
     cfg = hardware_config(**{**PROFILES[name], **overrides})
     async with SimGimbal(ground, cfg) as sim:
         lock = GimbalPointLock(
-            send=sim.rotate, send_angle=sim.set_angle, hfov_deg=80,
-            loop=model_of(cfg, error=model_error), attitude=sim.history, control="rate",
-            trust_video_delay=True, smith=smith,
+            send=sim.rotate,
+            send_angle=sim.set_angle,
+            hfov_deg=80,
+            loop=model_of(cfg, error=model_error),
+            attitude=sim.history,
+            control="rate",
+            trust_video_delay=True,
+            smith=smith,
         )
         if configure is not None:
             configure(lock)

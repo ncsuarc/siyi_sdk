@@ -17,7 +17,8 @@ def test_tracking_debug_overlay_draws_and_tolerates_no_data() -> None:
     info = {
         "before": np.array([[10.0, 10.0], [50.0, 40.0], [80.0, 60.0], [90.0, 30.0]]),
         "after": np.array([[11.0, 10.0], [52.0, 41.0], [81.0, 60.0], [92.0, 31.0]]),
-        "kind": np.array([0, 1, 2, 3], np.uint8), "scale": 0.5,
+        "kind": np.array([0, 1, 2, 3], np.uint8),
+        "scale": 0.5,
     }
     draw_tracking_debug(image, info, 0.75, 0.2)
     assert image.any()

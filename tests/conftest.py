@@ -212,10 +212,6 @@ def frame_gimbal_mode_ack() -> bytes:
     ).to_bytes()
 
 
-
-
-
-
 @pytest.fixture
 def frame_encoding_params_ack() -> bytes:
     """Encoding params ACK frame (0x20)."""
@@ -301,14 +297,6 @@ def frame_gimbal_system_info_ack() -> bytes:
     return Frame(
         ctrl=CTRL_ACK_PACK, seq=31, cmd_id=CMD_REQUEST_GIMBAL_SYSTEM_INFO, data=payload
     ).to_bytes()
-
-
-
-
-
-
-
-
 
 
 @pytest.fixture

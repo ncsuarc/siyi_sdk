@@ -70,7 +70,9 @@ async def test_lock_steers_and_draws(camera, ground) -> None:
 async def test_scene_moving_left_moves_the_spot_left(camera, ground) -> None:
     await camera.start_lock(0.0, 0.0)
     for t, dx in enumerate(range(0, 120, 12)):
-        await camera._on_frame(frame(ground[:, dx:dx + 1280].copy(), time.monotonic() + t * 0.033))
+        await camera._on_frame(
+            frame(ground[:, dx : dx + 1280].copy(), time.monotonic() + t * 0.033)
+        )
     # The view slid right by 108 px, so the locked spot moved 108 px left.
     assert camera.lock_snapshot()["x"] == pytest.approx(-108 / 1280, abs=0.004)
 

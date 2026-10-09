@@ -22,9 +22,6 @@ from numpy.typing import NDArray
 _RECONNECT_DELAY_CAP: float = 30.0
 
 
-
-
-
 class StreamBackend(str, Enum):
     """Video streaming backend selection.
 

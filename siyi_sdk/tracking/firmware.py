@@ -160,9 +160,16 @@ class FirmwarePointLock:
             try:
                 if generation != self._generation:
                     raise RuntimeError("Point lock cancelled during initialization")
-                self.client.note("lock_start", x=round(x), y=round(y), size=size, zoom=zoom,
-                                 frame=f"{width}x{height}", response=self._response,
-                                 send_interval=self._send_interval)
+                self.client.note(
+                    "lock_start",
+                    x=round(x),
+                    y=round(y),
+                    size=size,
+                    zoom=zoom,
+                    frame=f"{width}x{height}",
+                    response=self._response,
+                    send_interval=self._send_interval,
+                )
                 if self._owns_connection:
                     await self.client.connect()
                 elif not self.client.is_connected:
@@ -243,7 +250,9 @@ class FirmwarePointLock:
         )
         with contextlib.suppress(Exception):  # diagnostics must never break steering
             self.client.note(
-                "target", tracked=[round(v) for v in tracker.center()], sent=list(target),
+                "target",
+                tracked=[round(v) for v in tracker.center()],
+                sent=list(target),
                 score=round(float(tracker.getTrackingScore()), 3),
                 video_age_ms=round((time.monotonic() - self._last_timestamp) * 1000),
             )
@@ -353,8 +362,9 @@ class FirmwarePointLock:
                 except Exception as exc:
                     # AI mode survives disconnects and the camera can stall briefly, so try
                     # once more; if the camera closed the channel, open a fresh one first.
-                    self.client.note("disable_retry", error=repr(exc),
-                                     connected=self.client.is_connected)
+                    self.client.note(
+                        "disable_retry", error=repr(exc), connected=self.client.is_connected
+                    )
                     if not self.client.is_connected:
                         if not self._owns_connection:
                             raise  # the link switches AI mode off when it reconnects

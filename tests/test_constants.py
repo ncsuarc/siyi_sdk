@@ -183,13 +183,9 @@ class TestCommandIDs:
 class TestHardwareIDs:
     """Test hardware ID constants."""
 
-
     def test_hw_id_a8_mini(self):
         """A8 Mini hardware ID should be 0x73."""
         assert constants.HW_ID_A8_MINI == 0x73
-
-
-
 
 
 class TestA8MiniLimits:

@@ -371,9 +371,7 @@ class Stamped(MockTransport):
 
 async def test_client_uses_the_arrival_times_a_transport_provides():
     got = []
-    transport = Stamped(
-        [(_video_packet(1) + _video_packet(2), 123.5), (_video_packet(3), 124.25)]
-    )
+    transport = Stamped([(_video_packet(1) + _video_packet(2), 123.5), (_video_packet(3), 124.25)])
     client = FirmwareTrackingClient(
         transport=transport, on_video=lambda i, _, t: got.append((i, t))
     )

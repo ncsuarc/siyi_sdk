@@ -100,11 +100,16 @@ class _VideoStats:
 
     def summary(self, now: float) -> dict[str, Any]:
         return {
-            "seconds": round(now - self.started, 2), "packets": self.packets,
-            "kbytes": round(self.nbytes / 1024, 1), "bursts": self.bursts,
-            "max_gap_ms": round(self.max_gap, 1), "gaps_over_200ms": self.gaps_over_200,
-            "pictures": self.deliveries, "max_batch": self.max_batch,
-            "max_decode_ms": round(self.max_decode, 1), "max_lag_ms": round(self.max_lag, 1),
+            "seconds": round(now - self.started, 2),
+            "packets": self.packets,
+            "kbytes": round(self.nbytes / 1024, 1),
+            "bursts": self.bursts,
+            "max_gap_ms": round(self.max_gap, 1),
+            "gaps_over_200ms": self.gaps_over_200,
+            "pictures": self.deliveries,
+            "max_batch": self.max_batch,
+            "max_decode_ms": round(self.max_decode, 1),
+            "max_lag_ms": round(self.max_lag, 1),
         }
 
 
@@ -251,15 +256,23 @@ class FirmwareLink:
             # only the newest picture, so a burst never builds a backlog.
             started = time.monotonic()
             image = await asyncio.to_thread(self._decode, batch)
-            self._stats.delivery((time.monotonic() - started) * 1000,
-                                 (batch[-1][2] - batch[-1][3]) * 1000, len(batch))
+            self._stats.delivery(
+                (time.monotonic() - started) * 1000,
+                (batch[-1][2] - batch[-1][3]) * 1000,
+                len(batch),
+            )
             # Per delivery: how many packets were waiting, decode time, and packet age.
             # lag_ms: how much longer the newest frame sat in the pipe than the window's best.
-            self._note("video_delivered", packets=len(batch), first=batch[0][0], last=batch[-1][0],
-                       decode_ms=round((time.monotonic() - started) * 1000, 1),
-                       age_ms=round((time.monotonic() - batch[-1][2]) * 1000, 1),
-                       lag_ms=round((batch[-1][2] - batch[-1][3]) * 1000, 1),
-                       picture=image is not None)
+            self._note(
+                "video_delivered",
+                packets=len(batch),
+                first=batch[0][0],
+                last=batch[-1][0],
+                decode_ms=round((time.monotonic() - started) * 1000, 1),
+                age_ms=round((time.monotonic() - batch[-1][2]) * 1000, 1),
+                lag_ms=round((batch[-1][2] - batch[-1][3]) * 1000, 1),
+                picture=image is not None,
+            )
             if image is not None:
                 self.last_frame_time = time.monotonic()
                 await self._on_frame(image, batch[-1][3])

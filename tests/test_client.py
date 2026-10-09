@@ -240,9 +240,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_retry_on_idempotent_read(self, mock_transport: MockTransport) -> None:
         """Test idempotent reads retry on timeout."""
-        client = SIYIClient(
-            mock_transport, default_timeout=0.1, max_retries=1
-        )
+        client = SIYIClient(mock_transport, default_timeout=0.1, max_retries=1)
         await client.connect()
 
         # Queue response after both attempts would have been sent
@@ -267,9 +265,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_no_retry_on_write(self, mock_transport: MockTransport) -> None:
         """Test write commands do not retry on timeout."""
-        client = SIYIClient(
-            mock_transport, default_timeout=0.1, max_retries=1
-        )
+        client = SIYIClient(mock_transport, default_timeout=0.1, max_retries=1)
         await client.connect()
 
         # Do not queue response
@@ -429,7 +425,6 @@ class TestCommandExecution:
 
         await client.close()
 
-
     @pytest.mark.asyncio
     async def test_fire_and_forget_send_raw_gps(self, mock_transport: MockTransport) -> None:
         """Test send_raw_gps is fire-and-forget."""
@@ -495,7 +490,6 @@ class TestStreamSubscriptions:
         assert len(received) == 5
 
         await client.close()
-
 
     @pytest.mark.asyncio
     async def test_on_function_feedback_subscription(self, mock_transport: MockTransport) -> None:
@@ -605,9 +599,9 @@ class TestSystemCommands:
 
         await client.close()
 
+
 class TestDigitalZoomCommands:
     """Test digital zoom commands."""
-
 
     @pytest.mark.asyncio
     async def test_manual_zoom(self, mock_transport: MockTransport) -> None:
@@ -625,7 +619,6 @@ class TestDigitalZoomCommands:
         assert zoom == 5.3
 
         await client.close()
-
 
     @pytest.mark.asyncio
     async def test_absolute_zoom(self, mock_transport: MockTransport) -> None:

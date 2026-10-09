@@ -162,7 +162,9 @@ class PointLock:
         if self._nearest is not None:
             kind[inlier_index[self._nearest]] = 3
         return {
-            "before": self.points.reshape(-1, 2), "after": moved.reshape(-1, 2), "kind": kind,
+            "before": self.points.reshape(-1, 2),
+            "after": moved.reshape(-1, 2),
+            "kind": kind,
             "scale": self.scale,
         }
 

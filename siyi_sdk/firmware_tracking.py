@@ -63,11 +63,28 @@ def disable_delayed_ack(sock: Any) -> bool:  # noqa: ANN401 - any socket-like ob
     frequency = wintypes.DWORD(1)
     returned = wintypes.DWORD(0)
     wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
-    wsa_ioctl.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
-                          ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-                          ctypes.c_void_p, ctypes.c_void_p]
-    result = wsa_ioctl(sock.fileno(), sio_tcp_set_ack_frequency, ctypes.byref(frequency),
-                       ctypes.sizeof(frequency), None, 0, ctypes.byref(returned), None, None)
+    wsa_ioctl.argtypes = [
+        ctypes.c_size_t,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    result = wsa_ioctl(
+        sock.fileno(),
+        sio_tcp_set_ack_frequency,
+        ctypes.byref(frequency),
+        ctypes.sizeof(frequency),
+        None,
+        0,
+        ctypes.byref(returned),
+        None,
+        None,
+    )
     return bool(result == 0)
 
 
@@ -247,8 +264,12 @@ class FirmwareTrackingClient:
         quick_ack = False
         with contextlib.suppress(Exception):
             quick_ack = disable_delayed_ack(getattr(self._transport, "socket", None))
-        self._emit("connected", ms=_ms(started), quick_ack=quick_ack,
-                   **_socket_details(getattr(self._transport, "socket", None)))
+        self._emit(
+            "connected",
+            ms=_ms(started),
+            quick_ack=quick_ack,
+            **_socket_details(getattr(self._transport, "socket", None)),
+        )
         self._reader = asyncio.create_task(self._read())
         self._keepalive = asyncio.create_task(self._keep_alive())
 
@@ -303,16 +324,24 @@ class FirmwareTrackingClient:
                         if self.video_frames == 0:
                             self._emit("video_started", header=frame.payload[:6].hex(" "))
                         self.video_frames += 1
-                        self._emit("video_packet", n=struct.unpack_from("<I", frame.payload)[0],
-                                   bytes=len(frame.payload) - 6, chunk=len(chunk))
+                        self._emit(
+                            "video_packet",
+                            n=struct.unpack_from("<I", frame.payload)[0],
+                            bytes=len(frame.payload) - 6,
+                            chunk=len(chunk),
+                        )
                         if self._on_video is not None:
                             index = struct.unpack_from("<I", frame.payload)[0]
                             with contextlib.suppress(Exception):
                                 self._on_video(index, frame.payload[6:], arrival)
                         continue
                     self._emit(
-                        "rx", cmd=f"0x{frame.command:02X}", seq=frame.sequence, flags=frame.flags,
-                        len=len(frame.payload), payload=frame.payload[:64].hex(" "),
+                        "rx",
+                        cmd=f"0x{frame.command:02X}",
+                        seq=frame.sequence,
+                        flags=frame.flags,
+                        len=len(frame.payload),
+                        payload=frame.payload[:64].hex(" "),
                     )
                     if frame.command == 0xAB and frame.payload == b"\x02":
                         self.error = "Camera rejected tracking coordinates: AI mode is disabled"
@@ -322,8 +351,9 @@ class FirmwareTrackingClient:
                         if not future.done() and (expected is None or frame.payload == expected):
                             future.set_result(frame.payload)
                 if parser.discarded != discarded:
-                    self._emit("rx_discarded", bytes=parser.discarded - discarded,
-                               total=parser.discarded)
+                    self._emit(
+                        "rx_discarded", bytes=parser.discarded - discarded, total=parser.discarded
+                    )
         except asyncio.CancelledError:
             how = "closed by app"
             raise
@@ -339,8 +369,13 @@ class FirmwareTrackingClient:
     async def _send(self, command: int, payload: bytes = b"", *, flags: int = 1) -> None:
         async with self._writes:
             self._sequence = (self._sequence + 1) & 0xFFFF
-            self._emit("tx", cmd=f"0x{command:02X}", seq=self._sequence, flags=flags,
-                       payload=payload.hex(" "))
+            self._emit(
+                "tx",
+                cmd=f"0x{command:02X}",
+                seq=self._sequence,
+                flags=flags,
+                payload=payload.hex(" "),
+            )
             await self._transport.send(encode_frame(command, payload, self._sequence, flags=flags))
 
     async def _request(

@@ -105,15 +105,19 @@ class LockMetrics:
         events = self._events
         return {
             "duration_s": round(duration, 2),
-            "rms_deg": round(math.sqrt(sum(e * e for e in errors) / len(errors)), 3)
-            if errors else None,
-            "p95_deg": round(errors[min(len(errors) - 1, int(len(errors) * 0.95))], 3)
-            if errors else None,
+            "rms_deg": (
+                round(math.sqrt(sum(e * e for e in errors) / len(errors)), 3) if errors else None
+            ),
+            "p95_deg": (
+                round(errors[min(len(errors) - 1, int(len(errors) * 0.95))], 3) if errors else None
+            ),
             # Every sample, jumps included: the score for continuous motion that never settles.
-            "rms_all_deg": round(math.sqrt(self._all_squared / self._samples), 3)
-            if self._samples else None,
-            "reversals_per_s": [round(r / duration, 2) for r in self._reversals]
-            if duration > 0 else None,
+            "rms_all_deg": (
+                round(math.sqrt(self._all_squared / self._samples), 3) if self._samples else None
+            ),
+            "reversals_per_s": (
+                [round(r / duration, 2) for r in self._reversals] if duration > 0 else None
+            ),
             "max_gap_ms": round(self._max_gap * 1000, 1),
             "events": len(events),
             "half_s": median([e.half_s for e in events if e.half_s is not None]),

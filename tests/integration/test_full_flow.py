@@ -165,9 +165,7 @@ class TestCommandRetries:
         frame_firmware_version_ack: bytes,
     ) -> None:
         """Test that idempotent reads retry on timeout."""
-        client = SIYIClient(
-            mock_transport, default_timeout=0.2, max_retries=2
-        )
+        client = SIYIClient(mock_transport, default_timeout=0.2, max_retries=2)
         await client.connect()
 
         # First attempt: no response (timeout)
@@ -186,9 +184,7 @@ class TestCommandRetries:
         mock_transport: MockTransport,
     ) -> None:
         """Test that write commands do NOT retry on timeout."""
-        client = SIYIClient(
-            mock_transport, default_timeout=0.2, max_retries=2
-        )
+        client = SIYIClient(mock_transport, default_timeout=0.2, max_retries=2)
         await client.connect()
 
         # Don't queue any response - should timeout without retry
