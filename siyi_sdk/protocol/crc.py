@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """CRC-16/XMODEM implementation for SIYI protocol.
 
 This module provides CRC-16/XMODEM checksum calculation using the

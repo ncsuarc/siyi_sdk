@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Keep the gimbal pointed at whatever is in the image centre right now.
 
 Locks the spot at the centre of the first video frame, then steers the gimbal

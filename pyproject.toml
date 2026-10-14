@@ -36,6 +36,8 @@ stream-gst     = ["numpy>=1.21", "PyGObject>=3.42"]
 stream-aiortsp = ["numpy>=1.21", "aiortsp>=1.4,<2", "av>=14"]
 web            = ["numpy>=1.21", "fastapi>=0.110", "uvicorn[standard]>=0.29", "pydantic>=2.7", "opencv-python>=4.5", "aiortsp>=1.4,<2", "av>=14"]
 tracking       = ["numpy>=1.21", "opencv-python>=4.5"]
+remote         = ["websockets>=13"]
+remote-server  = ["websockets>=13", "pydantic>=2.7", "numpy>=1.21", "opencv-python>=4.5", "aiortsp>=1.4,<2", "av>=14"]
 
 [dependency-groups]
 dev = [
@@ -49,6 +51,8 @@ dev = [
     "pre-commit>=3.7,<5",
     "opencv-python>=4.5",
     "numpy>=1.21",
+    "websockets>=13",
+    "pydantic>=2.7",
 ]
 
 [project.urls]
@@ -83,6 +87,8 @@ dependencies = [
     "pytest-asyncio>=0.23,<1",
     "pytest-cov>=5,<6",
     "hypothesis>=6.100,<7",
+    "websockets>=13",
+    "pydantic>=2.7",
 ]
 
 [tool.hatch.envs.test.env-vars]
@@ -100,6 +106,8 @@ dependencies = [
     # NumPy 2.3+ drops Python 3.10; its stubs use syntax newer than our mypy target.
     "numpy>=1.21,<2.3",
     "opencv-python>=4.5",
+    "websockets>=13",
+    "pydantic>=2.7",
 ]
 
 [tool.hatch.envs.lint.env-vars]

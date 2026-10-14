@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Debug and ArduPilot-specific command encoders and decoders (0x27-0x2A, 0x70, 0x71).
 
 This module implements encoding/decoding for debug and weak control commands including:

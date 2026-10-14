@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Camera command encoders/decoders (0x0A, 0x0B, 0x0C, 0x20, 0x21, 0x48-0x4C).
 
 This module implements encoding/decoding for camera control commands including:

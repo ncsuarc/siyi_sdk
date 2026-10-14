@@ -1,6 +1,23 @@
 # Point lock
 
-Point lock keeps the gimbal pointed at a fixed spot in the scene while the aircraft moves. Install it with `pip install "siyi-sdk[tracking]"` (OpenCV and NumPy). It runs on the CPU; on a 1280-pixel-wide frame the tracker takes about 2 ms per frame on a desktop.
+Point lock keeps the gimbal pointed at a fixed spot in the scene while the aircraft moves. Install it with `pip install -e ".[tracking]"` (OpenCV and NumPy). It runs on the CPU; on a 1280-pixel-wide frame the tracker takes about 2 ms per frame on a desktop.
+
+## From a ground station
+
+In flight, the lock runs in the camera service on the companion computer, and the ground station drives it over RPC. You don't need to wire up any of the classes below:
+
+```python
+from siyi_sdk.remote import RemoteCamera
+
+async with RemoteCamera("ws://<companion-ip>:8765") as cam:
+    await cam.calibrate()                       # once per installation; saved on the aircraft
+    cam.on_lock_status(print)
+    await cam.lock(x, y, frame_time=frame.timestamp)   # x, y: -0.5..0.5 from the image centre
+    ...
+    await cam.release()
+```
+
+The service builds the lock from its stored calibration, feeds it the camera's video and attitude, and releases it on loss or manual override. The [ground station guide](remote.md#point-lock) covers the options. The rest of this page explains how the lock works, and how to run it in your own process.
 
 ## How it works
 
@@ -13,10 +30,12 @@ The hard part is delay. A decoded frame shows the scene as it was 150-300 ms ago
 2. Adding the gimbal attitude at that same moment, from `AttitudeHistory`, gives the spot's direction in gimbal angles. That direction doesn't depend on where the gimbal has turned since.
 3. A straight-line fit over the last 0.4 s of these directions gives the spot's angular velocity (a ground spot drifts across the sky as the aircraft flies past).
 4. A 50 Hz control loop predicts the spot's direction now, compares it with the newest attitude sample, and acts:
-   - `control="angle"`: sends the predicted direction as a `0x0E` angle target and lets the gimbal's own position controller do the fast work. There is nothing to tune.
-   - `control="rate"`: PI on the predicted error plus velocity feedforward, sent as `0x07` speeds. Gains follow from the measured delay (`LockGains.for_model`).
+   - `control="angle"` (the camera service's default): sends the predicted direction as a `0x0E` angle target and lets the gimbal's own position controller do the fast work. There is nothing to tune.
+   - `control="rate"` (the `GimbalPointLock` default): PI on the predicted error plus velocity feedforward, sent as `0x07` speeds. Gains follow from the measured delay (`LockGains.for_model`).
 
 Without an `AttitudeHistory`, the lock falls back to a slower PI loop on the raw, delayed image error, once per frame.
+
+### In your own process
 
 ```python
 from siyi_sdk import connect_udp
@@ -24,6 +43,7 @@ from siyi_sdk.models import DataStreamFreq, GimbalDataType
 from siyi_sdk.tracking import AttitudeHistory, GimbalPointLock, LoopModel
 
 client = await connect_udp()
+current_zoom = await client.get_current_zoom()   # keep this updated when you zoom
 history = AttitudeHistory()
 history.attach(client)
 await client.request_gimbal_stream(GimbalDataType.ATTITUDE, DataStreamFreq.HZ50)
@@ -58,7 +78,18 @@ await lock.release()
 | Attitude direction convention | Sign of that fit |
 | Field of view | Scale of that fit |
 
-Point the camera at a textured, still scene. The dashboard runs this from **Settings → Point and drag → Measure loop timing** and saves the results.
+Point the camera at a textured, still scene. From code, run the attitude stream into an `AttitudeHistory`, feed every decoded frame to a `FrameMotionRecorder`, and pass a speed-command sender:
+
+```python
+from siyi_sdk.tracking import FrameMotionRecorder, calibrate_loop
+
+recorder = FrameMotionRecorder()
+stream.on_frame(lambda f: recorder.add_async(f.frame, f.timestamp))
+result = await calibrate_loop(client.rotate_nowait, history, recorder, hfov_deg=81.0)
+loop = result.model     # LoopModel for GimbalPointLock(loop=...); also result.attitude_signs, result.hfov_deg
+```
+
+Over RPC, `await cam.calibrate()` runs it on the aircraft and stores the result. The debugging dashboard runs the same measurement under **Settings → Point and drag → Measure loop timing**.
 
 ## Robustness
 
@@ -96,6 +127,8 @@ The simulation is a model, not the A8 Mini. How the real gimbal responds to a 50
 - Point lock does not follow moving objects; use an object tracker such as `cv2.TrackerNano` for those, and do not rely on its score alone to detect loss.
 
 ## Performance and image-format compatibility
+
+This section matters if you use `FirmwareLink` (see [firmware tracking](firmware-tracking.md)) or tune buffer limits.
 
 `FirmwareLink` now delivers full-resolution, single-channel `uint8` grayscale images by default. `PointLock`, `GimbalPointLock`, `FirmwarePointLock`, and calibration recording accept both grayscale and BGR images. Image coordinates and ROI sizes still refer to the original resolution. Consumers requiring color or an `(H, W, 3)` array must pass `image_format="bgr24"`; the ground dashboard does this explicitly. RTSP `StreamFrame` remains BGR.
 

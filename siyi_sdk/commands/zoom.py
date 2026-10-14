@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Zoom command encoders and decoders (0x05, 0x0F, 0x16, 0x18).
 
 This module implements encoding/decoding for zoom control commands including:

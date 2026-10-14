@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Turn a pointing error into gimbal rotation-speed commands.
 
 Pure Python with no OpenCV dependency, so it can be unit tested and reused with

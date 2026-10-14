@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Try OpenCV single-object trackers on a video file, camera, or RTSP stream.
 
 Draw a box around a target and watch one or more trackers follow it. Each

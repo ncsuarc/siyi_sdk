@@ -4,6 +4,8 @@ SIYI gimbal cameras expose a REST API on port **82** for browsing and downloadin
 
 The SDK wraps this API in the `MediaClient` class.
 
+The [camera service](remote.md) does not proxy this API. A ground station that wants to browse or download files uses `MediaClient` directly with the camera's address, which needs the camera network routed over the radio link, as for video.
+
 ## Connection details
 
 | Property | Value |

@@ -1,8 +1,12 @@
 # A8 Mini examples
 
-Install the package with `pip install -e .`. The examples use the default camera address `192.168.144.25:37260`; adjust it for your network.
+Install the package with `pip install -e .`; the video examples also need a stream extra, and `point_lock.py` / `tracker_demo.py` need `tracking`. The [SDK guide](../docs/sdk-guide.md) explains the API they use. The examples use the default camera address `192.168.144.25:37260`; adjust it for your network.
 
-## Control and status
+## Ground station
+
+- `remote_ground.py`: control, telemetry and point lock through the camera service on a companion computer (`remote` extra on the ground, `remote-server` on the aircraft). See `docs/remote.md`.
+
+## Control and status (direct)
 
 - `udp_control.py`: basic UDP connection, firmware, and attitude check. UDP does not require heartbeat frames.
 - `system_info.py`, `soft_reboot.py`: device information and maintenance.

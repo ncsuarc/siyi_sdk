@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (remote control)
+
+- `siyi_sdk.remote`: a camera service for a companion computer
+  (`python -m siyi_sdk.remote.server`, extra `remote-server`) and a ground-station
+  client `RemoteCamera` (extra `remote`), speaking JSON-RPC 2.0 over one websocket.
+  `RemoteCamera` mirrors `SIYIClient`'s methods, return types and exceptions; point
+  lock (app angle/rate or firmware controller), calibration and lock settings run on
+  the aircraft. Speed setpoints (`rate`, `zoom_rate`) stop by themselves 0.3 s after
+  updates stop, and when the controlling client disconnects. One client controls,
+  others observe. A lock can start on the frame the operator clicked, using clock
+  sync and a short frame buffer. See `docs/remote.md`.
+- The typed command allowlist moved from `web_ui/command_explorer.py` to
+  `siyi_sdk.remote.registry`, shared by the service and the dashboard.
+
+### Documentation
+
+- New `docs/remote.md`, the ground station guide: quick start, `RemoteCamera` usage
+  (commands, joystick setpoints, point lock, calibration, events, control, errors),
+  running the service, a full RPC reference and the wire format. README, quickstart,
+  SDK guide, point lock, firmware tracking, streaming and media docs now show the
+  ground-station path alongside direct use. CONTRIBUTING has the correct repository
+  and branch, a project layout, and how to expose a command over RPC.
+- New `docs/sdk-guide.md` for using the SDK as a library: connection options and
+  reconnection, acknowledged vs. `_nowait` commands, telemetry callbacks, the
+  exception hierarchy, logging, `MockTransport`, and running inside a service.
+- New `docs/firmware-tracking.md` for `FirmwareTrackingClient`, `FirmwareLink` and
+  `FirmwarePointLock`.
+- README and quickstart lead with the SDK; the web dashboard is documented as a
+  debugging tool. `docs/protocol.md` no longer mentions the removed sequence
+  matching option, and lists the commands the A8 Mini does not answer.
+
 ### Added
 
 - `siyi_sdk.tracking` (extra `tracking`): `PointLock` follows a fixed spot in the

@@ -1,5 +1,7 @@
 # A8 Mini web dashboard
 
+The dashboard is a bench and debugging tool: it exercises the SDK against a real camera, shows the raw protocol traffic, and helps calibrate point lock. It is not a ground-station or flight interface, and your own programs should use the SDK directly (see the [SDK guide](sdk-guide.md)), or control the camera from a ground station over RPC (see the [ground station guide](remote.md)).
+
 With [uv](https://docs.astral.sh/uv/) (recommended, no manual venv or Python install needed):
 
 ```

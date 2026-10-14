@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Measure the point-lock loop: turn rate, command delay, video delay, signs and field of view.
 
 The gimbal is turned at a fixed speed on one axis and back while two things

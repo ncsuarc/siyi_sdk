@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """System command encoders and decoders (0x00, 0x01, 0x02, 0x30, 0x31, 0x40, 0x80, 0x81, 0x82).
 
 This module implements encoding/decoding for system-level commands including:

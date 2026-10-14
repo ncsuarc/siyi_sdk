@@ -1,9 +1,3 @@
-# Copyright (c) 2026 Mohamed Abdelkader <mohamedashraf123@gmail.com>
-# All rights reserved.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Record 30 seconds of A8 Mini RTSP video to output.mp4.
 
 Demonstrates using cv2.VideoWriter to save a SIYI RTSP stream to an MP4

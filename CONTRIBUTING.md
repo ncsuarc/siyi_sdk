@@ -13,13 +13,15 @@ Thank you for your interest in contributing to the SIYI SDK project!
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/OWNER/siyi-sdk.git
-   cd siyi-sdk
+   git clone https://github.com/ncsuarc/siyi_sdk.git
+   cd siyi_sdk
    ```
 
-2. Create the development environment:
+2. Create the development environment, with hatch (as CI does) or uv:
    ```bash
    hatch env create
+   # or
+   uv sync --extra remote-server --extra web --extra tracking
    ```
 
 3. Install pre-commit hooks:
@@ -73,7 +75,7 @@ hatch run lint:typecheck
 
 ## Submitting Changes
 
-1. Create a feature branch from `main`:
+1. Create a feature branch from `siyi-sdk-v2` (the main branch):
    ```bash
    git checkout -b feature/your-feature-name
    ```
@@ -99,6 +101,25 @@ hatch run lint:typecheck
    ```
 
 6. Ensure CI/CD pipeline passes all checks before requesting review.
+
+## Project Layout
+
+| Path | Contents |
+| --- | --- |
+| `siyi_sdk/client.py`, `siyi_sdk/commands/`, `siyi_sdk/protocol/`, `siyi_sdk/transport/` | `SIYIClient` and the SIYI binary protocol |
+| `siyi_sdk/stream/` | RTSP video backends |
+| `siyi_sdk/tracking/` | Point lock, calibration, firmware tracking |
+| `siyi_sdk/remote/` | Camera service and `RemoteCamera`: `session.py` (camera, video, lock, deadman), `server.py` (websocket, JSON-RPC dispatch, control), `client.py` (ground side), `protocol.py` (wire format, errors), `registry.py` (commands allowed by name) |
+| `web_ui/` | Debugging dashboard (not part of the package) |
+| `docs/` | User guides; `docs/remote.md` documents the RPC interface |
+
+### Exposing a camera command over RPC
+
+1. Add the `SIYIClient` method to `_GROUPS` in `siyi_sdk/remote/registry.py`. Its signature becomes the RPC parameter schema, and `get_*` methods are open to observers. Leave it out of `REMOTE_EXCLUDED` unless it keeps the camera moving until another command (those need a setpoint with a deadman instead).
+2. Add a typed wrapper with the same signature to `RemoteCamera` in `siyi_sdk/remote/client.py`.
+3. List it in the RPC reference in `docs/remote.md`.
+
+Service-level methods (not camera commands) go in `CameraServer._build_methods` in `siyi_sdk/remote/server.py`, with the work done in `CameraSession`.
 
 ## Code Style Guidelines
 
