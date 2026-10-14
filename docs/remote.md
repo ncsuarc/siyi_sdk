@@ -2,17 +2,11 @@
 
 In flight, the A8 Mini is wired to a companion computer (for example a Raspberry Pi), and the ground station reaches that computer over the radio link. The SDK runs on the companion computer as a **camera service**. The ground station controls the camera through **remote procedure calls** (JSON-RPC 2.0 over one websocket), using the Python client `RemoteCamera`:
 
-```
- GROUND STATION                     COMPANION COMPUTER (Pi)                    A8 MINI
- ┌──────────────────┐   websocket   ┌───────────────────────────────┐   UDP    ┌────────┐
- │ RemoteCamera     │ ────────────▶ │ camera service                │ ───────▶ │ gimbal │
- │  .set_attitude() │  JSON-RPC 2.0 │  python -m                    │  37260   │ camera │
- │  .rate()         │ ◀──────────── │    siyi_sdk.remote.server     │ ◀─────── │        │
- │  .lock()         │    events     │  point lock, deadman, telemetry│  video   │        │
- └──────────────────┘               └───────────────────────────────┘          └────────┘
-          ▲                                                                        │
-          └──────────────────── RTSP video, straight from the camera ──────────────┘
-```
+| Connection | Port | Carries |
+| --- | --- | --- |
+| Ground station → companion computer | TCP 8765 (websocket) | Commands, joystick setpoints and events, as JSON-RPC |
+| Companion computer → A8 Mini | UDP 37260 | SIYI camera protocol |
+| Ground station → A8 Mini | RTSP 8554 | Live video, straight from the camera |
 
 - **Companion computer:** the service owns the camera. Point lock runs here, because its control loop can't tolerate radio latency. This is also where manual motion is stopped if commands stop arriving.
 - **Ground station:** `RemoteCamera` has the same method names, arguments, return types and exceptions as the local `SIYIClient`, plus joystick setpoints, point lock and pushed events. Other languages can speak the [JSON protocol](#wire-format) directly.
@@ -28,6 +22,12 @@ python -m siyi_sdk.remote.server --camera-ip 192.168.144.25
 ```
 
 It listens on port 8765 and keeps retrying until the camera answers.
+
+From the ground, check what the service sees:
+
+```bash
+python -m siyi_sdk.remote status ws://192.168.144.30:8765
+```
 
 **2. On the ground**, install the client and connect:
 
@@ -151,10 +151,11 @@ await cam.lock(x, y, frame_time=frame.timestamp)        # StreamFrame.timestamp,
 
 **Calibrate once per installation.** The lock steers best with measured delays and axis directions:
 
-```python
-result = await cam.calibrate()      # turns the gimbal ~20 deg per axis and back; ~10 s
-print(result["notes"])
+```bash
+python -m siyi_sdk.remote calibrate ws://192.168.144.30:8765
 ```
+
+or from code, `await cam.calibrate()`. The gimbal turns about 20 degrees per axis and back, which takes about 10 s.
 
 Point the camera at a textured, still scene first. The results are saved on the companion computer and reused after reboots. Measure once per mounting (upright or upside down); both are remembered.
 
@@ -216,6 +217,16 @@ Errors arrive as the same exception types a local `SIYIClient` raises, plus a fe
 | `UnknownMethodError`, `RemoteError` | No such method, or an unexpected failure in the service |
 
 The service-specific ones are importable from `siyi_sdk.remote`.
+
+## Command line
+
+```bash
+python -m siyi_sdk.remote status    ws://<host>:8765   # camera, video, lock and control as the service sees them
+python -m siyi_sdk.remote calibrate ws://<host>:8765   # measure the point-lock loop (turns the gimbal)
+python -m siyi_sdk.remote release   ws://<host>:8765   # stop a point lock
+```
+
+The command exits with status 1 and prints the error if the service can't be reached.
 
 ## Running the service
 

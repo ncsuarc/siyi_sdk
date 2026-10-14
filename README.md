@@ -7,10 +7,6 @@ There are two ways to use it:
 - **Directly**, in a program on the computer wired to the camera: `SIYIClient` talks to the camera over UDP, TCP or UART.
 - **From a ground station over RPC**: the SDK runs as a camera service on the aircraft's companion computer (for example a Raspberry Pi). The ground station controls it through `RemoteCamera`, which has the same methods as `SIYIClient`. Point lock and the safety stop run on the aircraft.
 
-```
-ground station ── RemoteCamera ── websocket (JSON-RPC) ──▶ companion computer ── SIYIClient ──▶ A8 Mini
-```
-
 A local web dashboard is included for bench testing and debugging.
 
 ## Install

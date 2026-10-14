@@ -7,12 +7,13 @@ This sets up the [ground station RPC](remote.md) on our two machines:
 | **Iris** | Raspberry Pi on the aircraft, wired to the A8 Mini | The camera service: `python -m siyi_sdk.remote.server` |
 | **Shimmer** | Ground station | Ground software using `RemoteCamera`, plus RTSP video straight from the camera |
 
-```
-Shimmer ── radio link ──┬──▶ Iris :8765 (camera service) ──UDP 37260──▶ A8 Mini 192.168.144.25
-                        └──────────────────────── RTSP :8554 ─────────────▶ A8 Mini
-```
+| Connection | Port | Carries |
+| --- | --- | --- |
+| Shimmer → Iris | TCP 8765 (websocket) | Commands, joystick setpoints and events (JSON-RPC) |
+| Iris → A8 Mini | UDP 37260 | SIYI camera protocol |
+| Shimmer → A8 Mini | RTSP 8554 | Live video, over the radio |
 
-Shimmer sends commands to Iris over a websocket. Iris talks to the camera and runs point lock. Shimmer pulls video from the camera directly, because the camera's `192.168.144.x` network is routed over the radio.
+Iris talks to the camera and runs point lock. Shimmer pulls video from the camera directly, because the camera's `192.168.144.x` network is routed over the radio.
 
 Both machines get a full clone of this repository. Replace `<iris>` below with Iris's hostname or IP address as seen from Shimmer.
 
@@ -101,28 +102,31 @@ ping <iris>                       # the radio link to Iris
 ping 192.168.144.25               # the camera, routed over the radio (needed for video)
 ```
 
-Then connect to the service:
+Then ask the service what it sees:
 
 ```bash
-uv run python -c "
-import asyncio
-from siyi_sdk.remote import RemoteCamera
-async def main():
-    async with RemoteCamera('ws://<iris>:8765', name='shimmer') as cam:
-        state = await cam.get_state()
-        print('camera alive:', state['camera']['alive'], '| video:', state['video'], '| controller:', cam.is_controller)
-asyncio.run(main())
-"
+uv run python -m siyi_sdk.remote status ws://<iris>:8765
 ```
 
-Expect `camera alive: True`, video `live: True`, and `controller: True`.
+```
+service      ws://<iris>:8765  (round trip 35 ms)
+camera       alive  (192.168.144.25)
+firmware     ...
+attitude     yaw 0.2  pitch -0.4  (normal)
+zoom         1.0x (max 6.0x)
+video        live from firmware  (mode auto)
+lock         idle
+control      shimmer  (2 connected)
+```
+
+`control` names the ground program that has control. With nothing else connected, it shows `this client`.
 
 | Symptom | Check |
 | --- | --- |
 | `ConnectionError: Cannot reach camera service` | Service running on Iris (`systemctl status siyi-camera`), port 8765 open, correct `<iris>` address |
-| `camera alive: False` | `ping 192.168.144.25` *on Iris*; Iris's address on the camera network |
-| Video `live: False` | Give it a few seconds after start. Check the service logs on Iris for video errors |
-| `controller: False` | Another ground program is connected and has control. Use `take_control(force=True)` or close the other one |
+| `camera NOT ANSWERING` | `ping 192.168.144.25` *on Iris*; Iris's address on the camera network |
+| `video NONE` | Give it a few seconds after start. Check the service logs on Iris for video errors |
+| Your ground program gets `NotControllerError` | Another ground program has control (`control` line). Close it, or call `take_control(force=True)` |
 
 ### Try it
 
@@ -137,14 +141,7 @@ This prints attitude, nudges the gimbal, points it down, and locks the image cen
 Point the camera at a textured, still scene (not sky or water), with the aircraft still. Then, from Shimmer:
 
 ```bash
-uv run python -c "
-import asyncio
-from siyi_sdk.remote import RemoteCamera
-async def main():
-    async with RemoteCamera('ws://<iris>:8765') as cam:
-        print(await cam.calibrate())
-asyncio.run(main())
-"
+uv run python -m siyi_sdk.remote calibrate ws://<iris>:8765
 ```
 
 The gimbal turns about 20 degrees on each axis and back. The result is stored on Iris and used by every later lock, across reboots. Repeat it if the camera is remounted the other way up.

@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates stop, and when the controlling client disconnects. One client controls,
   others observe. A lock can start on the frame the operator clicked, using clock
   sync and a short frame buffer. See `docs/remote.md`.
+- `python -m siyi_sdk.remote status|calibrate|release <url>`: check a camera service
+  from the ground, run the point-lock calibration, or stop a lock.
 - The typed command allowlist moved from `web_ui/command_explorer.py` to
   `siyi_sdk.remote.registry`, shared by the service and the dashboard.
 
