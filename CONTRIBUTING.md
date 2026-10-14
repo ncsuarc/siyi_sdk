@@ -111,7 +111,7 @@ hatch run lint:typecheck
 | `siyi_sdk/tracking/` | Point lock, calibration, firmware tracking |
 | `siyi_sdk/remote/` | Camera service and `RemoteCamera`: `session.py` (camera, video, lock, deadman), `server.py` (websocket, JSON-RPC dispatch, control), `client.py` (ground side), `protocol.py` (wire format, errors), `registry.py` (commands allowed by name) |
 | `web_ui/` | Debugging dashboard (not part of the package) |
-| `docs/` | User guides; `docs/remote.md` documents the RPC interface |
+| `docs/` | User guides; `docs/remote.md` documents the RPC interface, `docs/deployment.md` the Iris/Shimmer setup |
 
 ### Exposing a camera command over RPC
 

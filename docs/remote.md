@@ -59,7 +59,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Replace `192.168.144.30` with the companion computer's address. [`examples/remote_ground.py`](../examples/remote_ground.py) is a complete script.
+Replace `192.168.144.30` with the companion computer's address. [`examples/remote_ground.py`](../examples/remote_ground.py) is a complete script. For our aircraft, [Setting up Iris and Shimmer](deployment.md) has the step-by-step install, boot service and checks.
 
 ## Using `RemoteCamera`
 

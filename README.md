@@ -61,7 +61,7 @@ async def main():
 asyncio.run(main())
 ```
 
-The **[ground station guide](docs/remote.md)** covers the full API: joystick setpoints, point lock and calibration, events, control between several ground stations, errors, running the service at boot, and the JSON protocol for clients in other languages.
+To set it up on our machines (Iris on the aircraft, Shimmer on the ground), follow **[Setting up Iris and Shimmer](docs/deployment.md)**. The **[ground station guide](docs/remote.md)** covers the full API: joystick setpoints, point lock and calibration, events, control between several ground stations, errors, running the service at boot, and the JSON protocol for clients in other languages.
 
 ## Directly
 

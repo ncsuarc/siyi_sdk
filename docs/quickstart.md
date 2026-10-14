@@ -58,6 +58,7 @@ asyncio.run(main())
 
 ## Next
 
+- [Setting up Iris and Shimmer](deployment.md): our aircraft and ground station, step by step.
 - [Ground station guide](remote.md): `RemoteCamera` and the RPC protocol.
 - [SDK guide](sdk-guide.md): `SIYIClient` in your own program.
 - [Streaming](streaming.md) and [examples](../examples/README.md).
