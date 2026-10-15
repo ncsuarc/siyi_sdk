@@ -218,6 +218,51 @@ Errors arrive as the same exception types a local `SIYIClient` raises, plus a fe
 
 The service-specific ones are importable from `siyi_sdk.remote`.
 
+## Browser and TypeScript
+
+A web ground station can connect straight to the service from the browser, without a backend in between. [`clients/typescript`](../clients/typescript) is the TypeScript counterpart of `RemoteCamera`. It works the same way: setpoints are held and resent, it reconnects with backoff and asks for control again, events are delivered to listeners, and the clock is synced for point lock. Every camera command is typed. Its types are generated from the Python registry, so they can't drift.
+
+```ts
+import { RemoteCamera, CenteringAction } from "@siyi-sdk/remote";
+
+const cam = new RemoteCamera("ws://192.168.144.30:8765", { name: "shimmer" });
+await cam.connect();
+
+cam.on("attitude", (att) => console.log(att.yaw_deg));
+await cam.call("set_attitude", { yaw_deg: 10, pitch_deg: -30 });   // params and result are typed
+await cam.call("one_key_centering", { action: CenteringAction.CENTER });
+cam.rate(40, 0);                                                   // call on every stick move
+await cam.lock(0.1, -0.05, { frameTime: performance.now() });
+```
+
+Camera commands go through `call()` under their `SIYIClient` names. Control, setpoints, point lock and the clock have methods of their own (`takeControl`, `rate`, `zoomRate`, `stop`, `lock`, `release`, `calibrate`, `ping`). Results arrive as plain objects. Enums arrive as numbers; compare them with the generated constants (`GimbalMotionMode.FOLLOW`). Failed calls reject with `RemoteError`; branch on `error.kind`, which is the service's `error.data.kind`, or `disconnected` / `timeout` from the client.
+
+Differences from the Python client:
+
+- `connect()` keeps retrying until the service answers, instead of failing on the first attempt. Pass `reconnect: false` to fail at once.
+- Browsers slow timers in hidden tabs, which would make held setpoints stutter, so motion stops when the tab is hidden. Pass `stopWhenHidden: false` to turn this off.
+- A browser can't send websocket pings, so the client drops the connection and reconnects when nothing has arrived for 3 s. The service sends attitude at 20 Hz and answers the client's pings every second.
+- `frameTime` is a `performance.now()` time in milliseconds, e.g. from `video.requestVideoFrameCallback`.
+
+React bindings are in `@siyi-sdk/remote/react`:
+
+```tsx
+import { CameraProvider, useCamera, useCameraEvent, useControl } from "@siyi-sdk/remote/react";
+
+<CameraProvider url="ws://192.168.144.30:8765" name="shimmer">
+  <GimbalPanel />
+</CameraProvider>
+
+function GimbalPanel() {
+  const cam = useCamera();
+  const attitude = useCameraEvent("attitude");   // re-renders on each event
+  const { controller, holder } = useControl();
+  return <button onClick={() => cam.call("set_attitude", { yaw_deg: 0, pitch_deg: -90 })}>Look down</button>;
+}
+```
+
+The package is TypeScript source with no build step, which Vite and other bundlers compile directly. Add it to an app with `npm install <path to this repo>/clients/typescript`. After changing `siyi_sdk.models` or the command registry, run `python scripts/generate_ts_types.py`; `tests/remote/test_ts_types.py` fails until you do. The package's own tests run against the real service on the fake camera: `npm test` in `clients/typescript`.
+
 ## Command line
 
 ```bash
